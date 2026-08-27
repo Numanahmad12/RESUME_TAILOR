@@ -19,13 +19,36 @@ def parse_pdf(path: str) -> ResumeSchema:
     except ImportError:
         raise ImportError("pdfplumber is required. Install: pip install pdfplumber")
 
+    # Clean up well-known PDF extraction artifacts BEFORE running the
+    # structured extractor, so that bullet characters encoded as
+    # "(cid:127)" or Unicode replacement markers don't end up as
+    # literal text and confuse the section segmentation.
     full_text = ""
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
             t = page.extract_text()
             if t:
                 full_text += t + "\n"
+    full_text = _clean_pdf_artifacts(full_text)
     return _extract_structured(full_text)
+
+
+def _clean_pdf_artifacts(text: str) -> str:
+    """Strip common PDF extraction artifacts.
+
+    Some PDFs encode bullet characters as '(cid:127)' because the font
+    embeds the bullet at a custom codepoint. pdfplumber passes that
+    through as literal text. Replace those with a real bullet so the
+    rest of the pipeline can detect skills lines and bullets normally.
+    """
+    # (cid:127) is the typical bullet codepoint in embedded fonts
+    text = re.sub(r"\(cid:127\)", "•", text)
+    # Replacement characters from broken Unicode
+    text = text.replace("�", "•")
+    # Strip phone-link artifacts like "n " and " & " that pdfplumber
+    # sometimes injects from the contact area
+    text = re.sub(r"^[ \t]*[&n][ \t]+", "", text, flags=re.M)
+    return text
 
 
 def parse_docx(path: str) -> ResumeSchema:
@@ -230,6 +253,44 @@ def _extract_skills(lines: list[str]) -> list[Skill]:
     """Extract skills ONLY from the dedicated Skills section. No full-text scan."""
     skills: dict[str, Skill] = {}
 
+    # Multi-character skills that contain slashes, dots, or other
+    # characters that the splitter would otherwise break on. We
+    # protect these by replacing the splitter-internal character with
+    # a placeholder before splitting, then restoring.
+    _PROTECTED = {
+        "ci/cd": "CI⧸CD",
+        "ci-cd": "CI-CD",
+        "c++":   "C⧸⧸",
+        "c#":    "C♯",
+        ".net":  "⧸NET",
+        "vue.js": "VUE⧸JS",
+        "node.js": "NODE⧸JS",
+        "next.js": "NEXT⧸JS",
+        "nuxt.js": "NUXT⧸JS",
+        "d3.js":  "D3⧸JS",
+        "rxjs":   "RXJS",
+    }
+    _RESTORE = {v: k for k, v in _PROTECTED.items()}
+
+    def _protect(text: str) -> str:
+        out = text
+        for original, placeholder in _PROTECTED.items():
+            out = re.sub(r"(?i)" + re.escape(original), placeholder, out)
+        return out
+
+    def _restore(name: str) -> str:
+        out = name
+        for placeholder, original in _RESTORE.items():
+            out = out.replace(placeholder, original)
+        # Normalize display form for known protected skills
+        if out.lower() == "ci⧸cd" or out.lower() == "ci-cd":
+            return "CI/CD"
+        if out.lower() == "c⧸⧸":
+            return "C++"
+        if out.lower() == "c♯":
+            return "C#"
+        return out
+
     for line in lines:
         # Strip common category labels like "Languages: Python, Java"
         # by splitting on the first colon if the part before it is short
@@ -237,13 +298,14 @@ def _extract_skills(lines: list[str]) -> list[Skill]:
             colon_idx = line.index(":")
             label = line[:colon_idx].strip()
             rest  = line[colon_idx+1:]
-            # If the label looks like a category (short, no spaces or ≤ 3 words)
+            # If the label looks like a category (short, no spaces or ≤ 4 words)
             if len(label) < 35 and len(label.split()) <= 4:
                 line = rest  # only parse the values, not the label
 
-        parts = re.split(r"[,;|•·\t/]+", line)
+        protected_line = _protect(line)
+        parts = re.split(r"[,;|•·\t]+", protected_line)
         for part in parts:
-            name = part.strip().strip(":-– ()")
+            name = _restore(part).strip().strip(":-– ()")
             # Keep names between 2 and 40 chars; skip obvious noise
             if 1 < len(name) < 40 and not re.match(r"^\d+$", name):
                 cat = _categorize_skill(name)
@@ -434,18 +496,154 @@ def _extract_education(lines: list[str]) -> list[EducationEntry]:
 def _extract_projects(lines: list[str]) -> list[ProjectEntry]:
     """Extract projects — handles table layout, titled blocks, and bullet lists.
 
-    Table layout (common in modern resumes): each row is one project, with the
-    left cell holding date/type and the right cell holding "Title | tag1 · tag2"
-    followed by a multi-line description.
-
-    Titled-block layout: a project name line followed by bullet points or
-    description paragraphs.
+    Three layouts are supported:
+    1. DOCX table layout (marker-based): each row is one project, with the
+       left cell holding date/type and the right cell holding
+       "Title | tag1 · tag2" followed by a multi-line description.
+    2. PDF flat-text 2-column layout: a project line is detected by the
+       presence of " | tag1 · tag2 · tag3" inline, with date/type on the
+       preceding line(s).
+    3. Titled-block layout (fallback): a project name line followed by
+       bullet points or description paragraphs.
     """
-    # ── Path 1: Table layout (the format in the user's real resume) ────────
+    # ── Path 1: DOCX table layout (marker-based) ───────────────────────────
     if any(l.strip() == "[[TABLE_BEGIN]]" for l in lines):
         return _extract_projects_from_table(lines)
 
-    # ── Path 2: Titled-block / bullet layout (fallback) ────────────────────
+    # ── Path 2: PDF flat-text 2-column layout ──────────────────────────────
+    if any(_looks_like_project_title_line(l) for l in lines):
+        return _extract_projects_from_pdf_layout(lines)
+
+    # ── Path 3: Titled-block / bullet layout (fallback) ────────────────────
+    return _extract_projects_from_blocks(lines)
+
+
+def _looks_like_project_title_line(line: str) -> bool:
+    """A project title line in the PDF flat-text layout is one that contains
+    a '|' separator followed by a '·' delimiter, e.g.
+        'Symbol Detection ML Model | Python · YOLO · OpenCV · TensorFlow'
+    """
+    s = line.strip()
+    if "|" not in s:
+        return False
+    if "·" not in s and "•" not in s:
+        return False
+    return True
+
+
+def _extract_projects_from_pdf_layout(lines: list[str]) -> list[ProjectEntry]:
+    """Parse projects from a PDF where the table is rendered as a 2-column
+    flat-text stream. A project title line contains ' | tag1 · tag2 · tag3'.
+    Preceding lines (date, type label like 'Personal Project') and following
+    lines (description paragraphs) belong to the same project until the next
+    title line appears.
+
+    Common PDF artifact: a left-column label like 'Robocon 2026 (AIR 21 -'
+    gets concatenated by pdfplumber with the right-column first description
+    line. We detect and strip that prefix.
+    """
+    entries: list[ProjectEntry] = []
+    current: Optional[dict] = None
+    description_buffer: list[str] = []
+
+    def flush():
+        if current is not None:
+            current["description"] = " ".join(description_buffer).strip()
+            entries.append(ProjectEntry(**current))
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip section headers and section-tail noise
+        if _SECTION_PATTERNS["projects"].match(stripped):
+            continue
+
+        if _looks_like_project_title_line(stripped):
+            flush()
+            # New project — split title and tags
+            name, tags = _split_title_and_tags(stripped)
+            # Strip a leading date range from the title ("2025 - 2026 Symbol...")
+            name = _strip_leading_date_range(name)
+            current = {
+                "name":         name or stripped[:60],
+                "description":  "",
+                "technologies": _extract_tags_as_technologies(tags) if tags else [],
+                "url":          "",
+            }
+            description_buffer = []
+            continue
+
+        # Continuation of current project
+        if current is not None:
+            # Strip any left-column noise that has been concatenated to this line
+            cleaned = _strip_left_column_prefix(stripped)
+            if not cleaned:
+                continue
+            description_buffer.append(cleaned)
+            # Pick up any tech keywords in the description body
+            for tech in _TECH_SKILLS:
+                if re.search(r"\b" + re.escape(tech) + r"\b", cleaned, re.I):
+                    if tech not in current["technologies"]:
+                        current["technologies"].append(tech)
+        # If no current and line is not a title, skip (likely a stray header)
+
+    flush()
+    return entries
+
+
+_DATE_RANGE_AT_START = re.compile(r"^\s*\d{4}\s*[–—-]\s*\d{4}\s+")
+_YEAR_ONLY_AT_START  = re.compile(r"^\s*\d{4}\s+")
+
+
+def _strip_leading_date_range(text: str) -> str:
+    """Remove a leading '2025 - 2026' or '2025' date prefix from a project title."""
+    text = _DATE_RANGE_AT_START.sub("", text, count=1)
+    text = _YEAR_ONLY_AT_START.sub("", text, count=1)
+    return text.strip()
+
+
+# Lines that pdfplumber creates by concatenating the LEFT column of a 2-column
+# table with the right column. These prefixes should be stripped.
+_LEFT_COL_PREFIX_PATTERNS = [
+    re.compile(r"^\s*\d{4}\s*[–—-]\s*\d{4}\s*"),  # 2025 - 2026
+    re.compile(r"^\s*\d{4}\s+"),                    # 2025
+    # (AIR 21 – Developed...) — the "(AIR" is leftover from the left column
+    re.compile(r"^\s*\(?\s*(?:AIR|All\s+India\s+Rank)\s*\d+[^)]*\)?\s*[–—-]?\s*", re.I),
+    # The full contest label from left column
+    re.compile(r"^\s*(?:Robocon|India\s+Innovates|AI\s+Drone|Smart\s+Crop|Aqua\s+Cleaner)\b[^()]*?\(?AIR[^()]*?\)\s*", re.I),
+    # "Robocon 2026 (AIR 21 -" — but only strip the label part, not the description
+    re.compile(r"^\s*(?:Robocon|India\s+Innovates)[^()]*?\(?AIR[^()]*?\)\s*[–—-]?\s*", re.I),
+    re.compile(r"^\s*(?:AIR|All\s+India\s+Rank)[^()]*?\)?\s*[–—-]?\s*", re.I),
+    # "Personal Project" / "Academic Project" / etc.
+    re.compile(r"^\s*Personal\s+Project\s*", re.I),
+    re.compile(r"^\s*Academic\s+Project\s*", re.I),
+    re.compile(r"^\s*Side\s+Project\s*", re.I),
+    re.compile(r"^\s*Open\s+Source\s*", re.I),
+    # Parenthetical contest results left behind
+    re.compile(r"^\s*\(?\s*(?:Finalist|Winner|Runner-?up|National|International|India|Hackathon)[a-zA-Z\s-]*\)\s*", re.I),
+    # "(Finalist)" that runs into the next word ("classification")
+    re.compile(r"^\s*\(?(?:Finalist|AIR)\)\s*", re.I),
+]
+
+
+def _strip_left_column_prefix(line: str) -> str:
+    """Try to strip any left-column noise from a project description line.
+    Returns the cleaned line, or '' if the line was entirely noise. The loop
+    strips prefixes repeatedly until no more match — handles cases like
+    'Robocon 2026 (AIR 21 -' + 'National)' where two patterns need to apply.
+    """
+    cleaned = line
+    for _ in range(8):  # enough passes to chew through any stacked prefix
+        prev = cleaned
+        for pat in _LEFT_COL_PREFIX_PATTERNS:
+            new = pat.sub("", cleaned, count=1)
+            if new != cleaned:
+                cleaned = new.strip()
+                break
+        if cleaned == prev:
+            break
+    return cleaned.strip()
     return _extract_projects_from_blocks(lines)
 
 
@@ -580,8 +778,9 @@ def _extract_projects_from_blocks(lines: list[str]) -> list[ProjectEntry]:
     current: Optional[dict]    = None
 
     # A "project title" line: starts with capital, reasonable length,
-    # not a bullet, not a date range
-    title_re = re.compile(r"^[A-Z\[][\w\s\-:|\[\]()]{2,70}$")
+    # not a bullet, not a date range. Accepts em-dash (–), en-dash (—),
+    # and pipe (|) which commonly appear in project titles.
+    title_re = re.compile(r"^[A-Z\[][\w\s\-–—:|\[\]()]{2,90}$")
 
     for line in lines:
         stripped = line.strip()
