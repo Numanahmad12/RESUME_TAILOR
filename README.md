@@ -20,6 +20,36 @@
 
 ---
 
+## 📸 Visual Showcase & Demonstration
+
+### 🌟 3D Interactive Resume Hero (Three.js + GSAP)
+The landing page features a high-fidelity 3D WebGL Resume Document that responds in real-time to mouse coordinates with realistic physics, holographic light sweeps, floating metric badges, and an active AI laser scanner:
+
+<p align="center">
+  <img src="docs/images/hero_3d_resume.png" alt="3D Interactive Resume Hero" width="850" />
+</p>
+
+<p align="center">
+  <img src="docs/images/interactive_mouse_tilt.png" alt="Interactive Mouse Tilt Physics" width="420" />
+  <img src="docs/images/interactive_scroll_animation.png" alt="GSAP ScrollTrigger Animation" width="420" />
+</p>
+
+### 🏆 Step 4: Separate Achievements & Certifications
+The tailoring pipeline automatically classifies credentials vs. competitive honors, rendering them in dedicated review cards with full editability:
+
+<p align="center">
+  <img src="docs/images/step4_achievements_certifications.png" alt="Step 4 Achievements and Certifications Separation" width="850" />
+</p>
+
+### 📄 Step 5: Full-Page Jake's Resume Output & Live PDF Preview
+The final tailored resume features adaptive multi-pass typography ensuring 100% full-page vertical coverage on exactly 1 page with distinct navy-ruled sections for `CERTIFICATIONS` and `ACHIEVEMENTS`:
+
+<p align="center">
+  <img src="docs/images/step5_pdf_preview.png" alt="Rendered PDF Preview with Dedicated Sections" width="850" />
+</p>
+
+---
+
 ## ⚡ Key Highlights & Features
 
 ### 1. 🌟 Interactive 3D Resume Hero (Three.js + GSAP)
