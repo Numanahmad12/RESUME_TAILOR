@@ -12,9 +12,14 @@ _TECH_KEYWORDS = {
     "Flask", "FastAPI", "Spring", "Rails", "Laravel",
     "AWS", "Azure", "GCP", "Docker", "Kubernetes", "Terraform", "Ansible",
     "PostgreSQL", "MySQL", "MongoDB", "Redis", "Kafka", "Elasticsearch",
-    "GraphQL", "REST", "gRPC", "SQL", "NoSQL", "Postgres",
+    "GraphQL", "REST", "REST API", "gRPC", "SQL", "NoSQL", "Postgres",
     "TensorFlow", "PyTorch", "scikit-learn", "Pandas", "NumPy", "Spark",
-    "Git", "Linux", "Nginx", "Jenkins", "GitHub Actions", "CI/CD",
+    "LangChain", "LLM", "LLMs", "RAG", "NLP", "OpenCV", "YOLO",
+    "Deep Learning", "Machine Learning", "Computer Vision", "CNN", "RNN",
+    "Vector Database", "ChromaDB", "Pinecone", "Weaviate", "Hugging Face",
+    "Transformers", "Keras", "Tailwind", "Microservices", "Raspberry Pi", "IoT",
+    "MLOps", "Prompt Engineering", "Git", "Linux", "Nginx", "Jenkins",
+    "GitHub Actions", "CI/CD",
 }
 
 

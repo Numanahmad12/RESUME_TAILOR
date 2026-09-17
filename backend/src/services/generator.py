@@ -2,8 +2,14 @@
 
 All patches are GROUNDED: they only rephrase or reorder what already exists
 in the candidate's resume.  Nothing is invented.
+
+LLM‑based tailoring — when an LLM client is provided, the service forwards
+the LaTeX resume and job‑description to the model, which returns a freshly
+tailored LaTeX paragraph.  If no client is available the heuristic patches
+are returned as before.
 """
 import json
+import os
 import re
 from typing import Optional
 
@@ -464,3 +470,116 @@ def _suggest_projects(missing_skills: list[str], jd: JointRequirementsSchema) ->
     # Sort by most overlap descending, return top 2
     scored.sort(key=lambda x: x[0], reverse=True)
     return [item for _, item in scored[:2]]
+
+
+# ---------------------------------------------------------------------------
+# LLM‑based LaTeX tailoring
+# ---------------------------------------------------------------------------
+
+def _llm_tailor_latex(
+    latex_resume: str,
+    jd: JointRequirementsSchema,
+    llm_client: Optional[object] = None,
+) -> str:
+    """Send the current LaTeX resume and job description to Gemini.
+
+    Gemini returns a freshly tailored LaTeX document that incorporates
+    JD‑required keywords, reorders skills, rewrites bullets, etc.
+    If no Gemini client is available the function uses a heuristic fallback.
+    """
+    if llm_client is None:
+        # Heuristic fallback — tailor the LaTeX using JD keywords
+        tailored = _heuristic_latex_tailor(latex_resume, jd)
+        return tailored
+
+    # ---- Gemini production path --------------------------------------------
+    try:
+        import google.generativeai as genai
+
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key or not gemini_key.startswith("AIza"):
+            raise ValueError("GEMINI_API_KEY is not configured")
+
+        genai.configure(api_key=gemini_key)
+
+        model_name = os.getenv("GEMINI_MODEL", "models/gemini-2.5-flash")
+        client = llm_client or genai.GenerativeModel(model_name)
+        prompt = _build_tailoring_prompt(latex_resume, jd)
+        try:
+            response = client.generate_content(prompt)
+        except Exception as e:
+            print(f"[Generator] Gemini generate_content error: {e}")
+            raise
+        tailored = response.text.strip()
+
+        if not tailored or "\\documentclass" not in tailored:
+            raise ValueError("Gemini did not return a valid LaTeX document")
+
+        return tailored
+
+    except ImportError:
+        raise RuntimeError("Gemini SDK is not installed. Install google-generativeai.")
+    except Exception as e:
+        # Fall back to heuristic tailoring if the LLM call fails
+        print(f"[Generator] Gemini tailoring failed: {e}")
+        tailored = _heuristic_latex_tailor(latex_resume, jd)
+        return tailored
+
+
+def _build_tailoring_prompt(latex_resume: str, jd: JointRequirementsSchema) -> str:
+    """Build the prompt that combines the LaTeX resume with the job description."""
+    required_skills = ", ".join(jd.required_skills) or "None specified"
+    preferred_skills = ", ".join(jd.preferred_skills) or "None specified"
+    responsibilities = "\n".join(f"- {r}" for r in jd.responsibilities) or "- None specified"
+    ats_keywords = ", ".join(jd.keywords_for_ats) or "None specified"
+
+    return f"""You are an expert resume writer and ATS optimization specialist.
+
+Your task is to rewrite the resume below into a completely new, highly tailored LaTeX resume for this specific job description.
+
+JOB DESCRIPTION:
+- Role Title: {jd.role_title or "Target Role"}
+- Seniority: {jd.seniority_level or "Not specified"}
+- Minimum Experience: {jd.min_years_experience} years
+- Required Skills: {required_skills}
+- Preferred Skills: {preferred_skills}
+- Responsibilities:
+{responsibilities}
+- ATS Keywords: {ats_keywords}
+
+RESUME (LaTeX source):
+{latex_resume}
+
+Instructions:
+1. Create a COMPLETE, valid LaTeX document from scratch. Include \\documentclass, all packages, \\begin{{document}}, sections, and \\end{{document}}.
+2. Use only verified facts from the resume. Do not invent experience, dates, companies, degrees, metrics, or certifications.
+3. Tailor the professional summary, skills ordering, work experience bullets, and project descriptions to the job description.
+4. Prioritize the required skills and ATS keywords naturally throughout the document.
+5. Reorder skills so the most relevant skills appear first.
+6. Rewrite bullets to emphasize relevant accomplishments and quantify impact when the resume provides supporting evidence.
+7. Keep the resume concise, professional, ATS-friendly, and no longer than 2 pages.
+8. Return ONLY the LaTeX source code, with no explanation, markdown fences, or commentary.
+9. Preserve the candidate's name, contact information, and all truthful experience details.
+10. Use standard LaTeX packages that compile with pdflatex or xelatex."""
+
+
+def _heuristic_latex_tailor(latex_resume: str, jd: JointRequirementsSchema) -> str:
+    """Heuristic fallback when Gemini is unavailable."""
+    tailored = latex_resume
+    jd_kws = [k for k in jd.required_skills + jd.preferred_skills + jd.keywords_for_ats if k]
+
+    if jd_kws:
+        # Add a JD-specific summary line when the resume has a summary section
+        summary_match = re.search(r"(\\section\*?\{Professional Summary\})(.*?)(?=\\section|\\end\{document\})", tailored, re.S)
+        if summary_match:
+            summary_text = summary_match.group(2)
+            role = jd.role_title or "target role"
+            new_summary = (
+                f"\\section*{{Professional Summary}}\n"
+                f"{summary_text.strip()}\n\n"
+                f"\\textbf{{Target Role:}} {role} \\textbf{{Key Skills:}} "
+                f"{', '.join(jd_kws[:8])}"
+            )
+            tailored = tailored[:summary_match.start()] + new_summary + tailored[summary_match.end():]
+
+    return tailored

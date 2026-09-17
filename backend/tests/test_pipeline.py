@@ -10,7 +10,7 @@ from backend.src.services.jd_analyzer import analyze_jd
 from backend.src.services.gap_analyzer import compute_match
 from backend.src.services.generator import generate_patches
 from backend.src.services.validator import validate_patches
-from backend.src.services.renderer import _build_html, _build_context
+from backend.src.services.renderer import _build_html, render_latex
 from backend.src.api.app import _apply_patches_to_resume, app
 
 
@@ -122,7 +122,7 @@ def test_apply_patches_and_rendering():
     patches = generate_patches(resume, jd, match)
     validated = validate_patches(resume, patches)
 
-    tailored = _apply_patches_to_resume(resume, validated.patches)
+    tailored, _, _ = _apply_patches_to_resume(resume, validated.patches)
     assert tailored.contact.name == resume.contact.name
     assert len(tailored.skills) > 0
 
@@ -131,3 +131,45 @@ def test_apply_patches_and_rendering():
     assert "jane.dev@example.com" in html
     assert "Skills" in html
     assert "Experience" in html
+
+
+def test_latex_generation():
+    """Test that LaTeX is generated from resume data without hallucination."""
+    sample_text = """
+    Jane Developer
+    jane.dev@example.com | +1 (555) 234-5678 | linkedin.com/in/janedev | github.com/janedev
+
+    SUMMARY
+    Full-Stack Software Engineer with 5+ years of experience in Python, TypeScript, React, and AWS cloud infrastructure.
+
+    SKILLS
+    Python, JavaScript, TypeScript, React, Next.js, FastAPI, Docker, Kubernetes, AWS, PostgreSQL, Redis, GraphQL, Git
+
+    EXPERIENCE
+    Innovate Corp — Senior Software Engineer
+    Jan 2021 – Present
+    • Designed and deployed scalable distributed microservices in FastAPI and Docker on AWS ECS.
+    • Improved API response times by 35% through Redis caching and PostgreSQL query optimization.
+
+    EDUCATION
+    University of Technology — B.S. in Computer Science (2019)
+
+    PROJECTS
+    CloudMetrics
+    Real-time infrastructure monitoring dashboard using Python, React, and Redis.
+
+    CERTIFICATIONS
+    AWS Certified Solutions Architect (2022)
+    """
+    resume = _extract_structured(sample_text)
+    from backend.src.services.latex_generator import generate_latex
+    latex = generate_latex(resume)
+    assert "\\documentclass" in latex
+    assert "\\begin{document}" in latex
+    assert "\\end{document}" in latex
+    assert "Jane Developer" in latex
+    assert "Python" in latex
+    assert "Skills" in latex
+    assert "Experience" in latex
+    assert "Education" in latex
+    print("LaTeX generation test passed")

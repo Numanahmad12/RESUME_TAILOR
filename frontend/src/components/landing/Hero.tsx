@@ -35,7 +35,7 @@ export default function Hero() {
   const reduce = useReducedMotion();
 
   return (
-    <section className="relative pt-12 pb-16 md:pt-20 md:pb-24 overflow-hidden">
+    <section id="hero-section" className="relative pt-12 pb-16 md:pt-20 md:pb-24 overflow-hidden">
       <div className="max-w-6xl mx-auto px-6">
         <div className="grid md:grid-cols-2 gap-10 items-center">
           {/* ── Left: text ─────────────────────────────────────────── */}

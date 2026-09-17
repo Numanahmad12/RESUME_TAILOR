@@ -3,10 +3,10 @@
  */
 import { create } from 'zustand';
 import type {
-  ResumeData, JdData, MatchReport, PatchAction,
+  ResumeData, JdData, MatchReport, RequirementsCheckResult, UserRequirements, ProjectSuggestion,
 } from '../utils/api';
 
-export type PipelineStep = 'upload' | 'analyze' | 'review' | 'download';
+export type PipelineStep = 'upload' | 'analyze' | 'requirements' | 'tailor' | 'download';
 
 interface PipelineState {
   // Step tracking
@@ -20,19 +20,22 @@ interface PipelineState {
   // Backend IDs
   resumeId: string | null;
   jdId: string | null;
-  generationId: string | null;
   finalId: string | null;
 
   // Data
   resumeData: ResumeData | null;
   jdData: JdData | null;
   matchReport: MatchReport | null;
-  patches: PatchAction[];
+  tailoredMatchReport: MatchReport | null;
+  requirements: RequirementsCheckResult | null;
+  userRequirements: UserRequirements;
   finalResumeData: ResumeData | null;
+  suggestedProjects: ProjectSuggestion[];
 
   // UI state
   isLoading: boolean;
   loadingMessage: string;
+  generationAttempted: boolean;
   error: string | null;
 
   // Actions
@@ -42,10 +45,12 @@ interface PipelineState {
   setResumeUploaded: (id: string, data: ResumeData) => void;
   setJdUploaded: (id: string, data: JdData) => void;
   setMatchReport: (report: MatchReport) => void;
-  setPatches: (generationId: string, patches: PatchAction[]) => void;
-  setFinalResume: (finalId: string, data: ResumeData) => void;
+  setRequirements: (reqs: RequirementsCheckResult) => void;
+  setUserRequirements: (reqs: UserRequirements | ((prev: UserRequirements) => UserRequirements)) => void;
+  setTailoredResult: (id: string, data: ResumeData, newMatch?: MatchReport, suggestedProjects?: ProjectSuggestion[]) => void;
   setLoading: (loading: boolean, message?: string) => void;
   setError: (error: string | null) => void;
+  setGenerationAttempted: (attempted: boolean) => void;
   goToStep: (step: PipelineStep) => void;
   reset: () => void;
 }
@@ -57,15 +62,18 @@ const initialState = {
   jdText: '',
   resumeId: null,
   jdId: null,
-  generationId: null,
   finalId: null,
   resumeData: null,
   jdData: null,
   matchReport: null,
-  patches: [],
+  tailoredMatchReport: null,
+  requirements: null,
+  userRequirements: { confirmed_skills: [], additional_context: '' },
   finalResumeData: null,
+  suggestedProjects: [] as ProjectSuggestion[],
   isLoading: false,
   loadingMessage: '',
+  generationAttempted: false,
   error: null,
 };
 
@@ -78,10 +86,20 @@ export const usePipeline = create<PipelineState>((set) => ({
   setResumeUploaded: (id, data) => set({ resumeId: id, resumeData: data }),
   setJdUploaded: (id, data) => set({ jdId: id, jdData: data }),
   setMatchReport: (report) => set({ matchReport: report }),
-  setPatches: (generationId, patches) => set({ generationId, patches }),
-  setFinalResume: (finalId, data) => set({ finalId, finalResumeData: data }),
+  setRequirements: (reqs) => set({ requirements: reqs }),
+  setUserRequirements: (reqs) => set((state) => ({
+    userRequirements: typeof reqs === 'function' ? reqs(state.userRequirements) : reqs,
+  })),
+  setTailoredResult: (id, data, newMatch, suggestedProjects) => set({
+    finalId: id,
+    finalResumeData: data,
+    tailoredMatchReport: newMatch || null,
+    suggestedProjects: suggestedProjects || [],
+  }),
   setLoading: (loading, message = '') => set({ isLoading: loading, loadingMessage: message }),
   setError: (error) => set({ error, isLoading: false }),
+  setGenerationAttempted: (attempted: boolean) => set({ generationAttempted: attempted }),
   goToStep: (step) => set({ currentStep: step }),
   reset: () => set(initialState),
 }));
+

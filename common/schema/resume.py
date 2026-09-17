@@ -61,6 +61,7 @@ class ResumeSchema(BaseModel):
     education: list[EducationEntry] = Field(default_factory=list)
     projects: list[ProjectEntry] = Field(default_factory=list)
     certifications: list[CertificationEntry] = Field(default_factory=list)
+    achievements: list[CertificationEntry] = Field(default_factory=list)
 
 
 class JointRequirementsSchema(BaseModel):
@@ -88,6 +89,7 @@ class MatchReport(BaseModel):
     gaps: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
     high_impact_improvements: list[str] = Field(default_factory=list)
+    gap_details: list[dict] = Field(default_factory=list)
 
 
 class PatchAction(BaseModel):

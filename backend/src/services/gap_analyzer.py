@@ -231,25 +231,124 @@ def compute_match(resume: ResumeSchema, jd: JointRequirementsSchema) -> MatchRep
     gaps: List[str] = []
     suggestions: List[str] = []
     high_impact_improvements: List[str] = []
+    gap_details: List[dict] = []
 
+    # 1. Hard Skills Gap
     if missing_required:
-        gaps.append(f"Missing required hard skills: {', '.join(missing_required)}")
-        suggestions.append(f"Add direct or related experience for required tools: {', '.join(missing_required[:4])}")
+        gap_str = f"Missing core required skills: {', '.join(missing_required[:5])}"
+        fix_str = (
+            f"Add verified academic, lab, or hobby experience for {', '.join(missing_required[:3])}. "
+            "Incorporate these keywords into your Technical Skills categories and mention them in relevant project bullet points."
+        )
+        gaps.append(gap_str)
+        suggestions.append(fix_str)
         high_impact_improvements.append(f"Incorporate target skills '{', '.join(missing_required[:3])}' into Technical Skills & bullet achievements.")
+        gap_details.append({
+            "category": "Hard Skills",
+            "gap": gap_str,
+            "severity": "high",
+            "how_to_fix": fix_str,
+        })
 
+    # 2. Preferred Skills Gap
     if missing_preferred:
-        gaps.append(f"Missing preferred qualifications: {', '.join(missing_preferred)}")
-        suggestions.append(f"Highlight any familiarity with preferred tech: {', '.join(missing_preferred[:3])}")
+        gap_str = f"Missing preferred tools/technologies: {', '.join(missing_preferred[:5])}"
+        fix_str = (
+            f"Highlight familiarity with {', '.join(missing_preferred[:3])} in project descriptions or notes. "
+            "Even conceptual familiarity or tutorial projects help score bonus ATS matching points."
+        )
+        gaps.append(gap_str)
+        suggestions.append(fix_str)
+        gap_details.append({
+            "category": "Preferred Skills",
+            "gap": gap_str,
+            "severity": "medium",
+            "how_to_fix": fix_str,
+        })
 
+    # 3. Experience & Tenure Gap
     if candidate_years < min_required_years:
-        gaps.append(f"Experience duration ({candidate_years:.1f}y) is below stated JD minimum ({min_required_years}y)")
-        suggestions.append("Emphasize high-complexity projects and accelerated leadership milestones to offset tenure gap.")
+        gap_str = f"Tenure gap: Resume reflects ~{candidate_years:.1f}y of formal experience vs JD stated requirement of {min_required_years}y"
+        fix_str = (
+            "Shift recruiter focus from calendar years to technical scope and production impact. "
+            "Highlight end-to-end architecture decisions, system reliability, and lead delivery milestones in your projects."
+        )
+        gaps.append(gap_str)
+        suggestions.append(fix_str)
         high_impact_improvements.append("Highlight senior scope, architectural decisions, and production ownership in bullet points.")
+        gap_details.append({
+            "category": "Experience Tenure",
+            "gap": gap_str,
+            "severity": "high" if (min_required_years - candidate_years >= 2) else "medium",
+            "how_to_fix": fix_str,
+        })
 
+    # 4. Quantifiable Impact & Metrics Gap
     if impact_metrics_score < 0.6:
-        gaps.append("Low metric density: Few bullet points contain quantified business impact or KPIs (%, $, latency, scale).")
-        suggestions.append("Quantify results: rewrite bullets using 'Accomplished [X] as measured by [Y], by doing [Z]' format.")
+        gap_str = "Low metric quantification: Bullets lack quantifiable KPIs (percentages, throughput, latency, revenue, user scale)"
+        fix_str = (
+            "Rewrite key bullet points using Google's XYZ formula: 'Accomplished [X] as measured by [Y], by doing [Z]'. "
+            "E.g., 'Reduced query latency by 35% by implementing Redis caching and database indexing'."
+        )
+        gaps.append(gap_str)
+        suggestions.append(fix_str)
         high_impact_improvements.append("Add measurable outcomes (e.g. 'reduced latency by 35%', 'handled 5M+ daily requests') to experience entries.")
+        gap_details.append({
+            "category": "Impact Metrics",
+            "gap": gap_str,
+            "severity": "medium",
+            "how_to_fix": fix_str,
+        })
+
+    # 5. Project Domain & Architecture Alignment Gap
+    role_lower = (jd.role_title or "").lower()
+    candidate_proj_techs = {t.lower() for p in resume.projects for t in p.technologies}
+    domain_gap_found = False
+    if any(k in role_lower for k in ["cloud", "devops", "sre", "infrastructure"]):
+        if not any(k in candidate_proj_techs for k in ["docker", "kubernetes", "k8s", "aws", "gcp", "terraform", "ci/cd"]):
+            domain_gap_found = True
+            gap_str = "Project domain gap: Portfolio lacks demonstrated cloud-native infrastructure or CI/CD container orchestration"
+            fix_str = "Build and link a cloud-native project: Containerize a multi-service app with Docker, configure GitHub Actions CI/CD, and deploy on AWS or GCP."
+    elif any(k in role_lower for k in ["ai", "machine learning", "ml", "data science", "llm"]):
+        if not any(k in candidate_proj_techs for k in ["pytorch", "tensorflow", "scikit", "rag", "llm", "langchain", "huggingface"]):
+            domain_gap_found = True
+            gap_str = "Project domain gap: Portfolio lacks demonstrated ML model development or LLM/RAG pipeline orchestration"
+            fix_str = "Implement and deploy an end-to-end RAG system or fine-tuned model API showcasing vector retrieval, evaluation metrics, and low-latency inference."
+    elif any(k in role_lower for k in ["full stack", "fullstack", "backend", "web"]):
+        if not any(k in candidate_proj_techs for k in ["react", "vue", "angular", "node", "fastapi", "django", "spring", "postgres"]):
+            domain_gap_found = True
+            gap_str = "Project domain gap: Projects do not prominently showcase modern full-stack web framework and relational database patterns"
+            fix_str = "Develop a full-stack SaaS project integrating React/TypeScript with a high-performance REST/GraphQL backend and relational PostgreSQL persistence."
+
+    if domain_gap_found:
+        gaps.append(gap_str)
+        suggestions.append(fix_str)
+        gap_details.append({
+            "category": "Project Domain",
+            "gap": gap_str,
+            "severity": "medium",
+            "how_to_fix": fix_str,
+        })
+
+    # 6. Certification Gap
+    jd_full_text = f"{jd.role_title} {' '.join(jd.required_skills)} {' '.join(jd.responsibilities)} {' '.join(jd.keywords_for_ats)}".lower()
+    cert_keywords = ["certified", "certification", "aws certified", "cka", "ckad", "azure", "gcp", "security+", "cissp"]
+    wants_certs = any(ck in jd_full_text for ck in cert_keywords)
+    resume_certs_lower = [c.name.lower() for c in resume.certifications]
+    if wants_certs and not any(any(ck in rc for ck in ["aws", "azure", "google cloud", "gcp", "kubernetes", "cka", "ckad", "security"]) for rc in resume_certs_lower):
+        gap_str = f"Industry certification gap: Target position prioritizes cloud/domain certifications not currently listed on your resume"
+        fix_str = (
+            "Target an entry/associate-level credential such as AWS Certified Cloud Practitioner / Solutions Architect, "
+            "or Kubernetes CKA/CKAD to strongly authenticate your practical technical depth."
+        )
+        gaps.append(gap_str)
+        suggestions.append(fix_str)
+        gap_details.append({
+            "category": "Certifications",
+            "gap": gap_str,
+            "severity": "medium",
+            "how_to_fix": fix_str,
+        })
 
     if not resume.summary:
         high_impact_improvements.append(f"Add a focused 2-sentence Professional Summary tailored to {jd.role_title}.")
@@ -272,4 +371,44 @@ def compute_match(resume: ResumeSchema, jd: JointRequirementsSchema) -> MatchRep
         gaps=gaps,
         suggestions=suggestions,
         high_impact_improvements=high_impact_improvements,
+        gap_details=gap_details,
     )
+
+
+def get_missing_requirements(resume: ResumeSchema, jd: JointRequirementsSchema) -> dict:
+    """Extract missing required and preferred skills, tools, or domain qualifications
+    so the candidate can be asked for clarification before tailoring the resume.
+    """
+    match = compute_match(resume, jd)
+    missing_req = list(dict.fromkeys(match.missing_required_skills))
+    missing_pref = list(dict.fromkeys(match.missing_preferred_skills))
+
+    resume_skill_names = {s.name.lower() for s in resume.skills}
+    resume_full_text = " ".join(filter(None, [
+        resume.summary,
+        " ".join(s.name for s in resume.skills),
+        " ".join(b.text for exp in resume.experience for b in exp.bullets),
+        " ".join(p.description for p in resume.projects),
+        " ".join(t for p in resume.projects for t in p.technologies),
+    ])).lower()
+
+    extra_keywords: list[str] = []
+    for kw in jd.keywords_for_ats[:15]:
+        if kw and not _skill_present(kw, resume_full_text, resume_skill_names):
+            if kw not in missing_req and kw not in missing_pref:
+                extra_keywords.append(kw)
+
+    needs_clarification = len(missing_req) > 0 or len(missing_pref) > 0
+
+    return {
+        "needs_clarification": needs_clarification,
+        "missing_required_skills": missing_req,
+        "missing_preferred_skills": missing_pref,
+        "extra_keywords": extra_keywords[:6],
+        "role_title": jd.role_title,
+        "prompt_message": (
+            f"The job description for '{jd.role_title}' specifically highlights "
+            f"{', '.join(missing_req[:4]) if missing_req else 'key skills'}. "
+            "Select any skills you have worked with, or add quick project notes to include them truthfully."
+        ) if needs_clarification else "Your profile aligns well with the key requirements!",
+    }

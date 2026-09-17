@@ -10,11 +10,14 @@ they caused content repetition and unreliable matching. A fresh build is
 more reliable and gives a consistent, ATS-friendly output every time.
 """
 import os
-from datetime import datetime
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from ..models.resume import ResumeSchema
+from ..services.latex_generator import generate_latex
+from ..services.jakes_template import _looks_like_award
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "outputs"))
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -37,7 +40,7 @@ def render_docx(
     compatibility but ignored: this renderer always drafts a fresh resume
     from the structured data, never patches the uploaded file.
     """
-    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     out_path  = OUTPUT_DIR / f"resume_{timestamp}.docx"
     return _render_docx_scratch(resume, str(out_path))
 
@@ -55,7 +58,7 @@ def render_pdf(
     ignored: this renderer always drafts a fresh resume from the
     structured data, never patches the uploaded file.
     """
-    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     out_path  = OUTPUT_DIR / f"resume_{timestamp}.pdf"
     return _render_pdf_scratch(resume, str(out_path))
 
@@ -184,15 +187,28 @@ def _render_docx_scratch(resume: ResumeSchema, out_path: str) -> str:
                     p2.paragraph_format.space_after = Pt(2)
                     run(p2, "Tech: " + ", ".join(proj.technologies), 9.0, color=MUTED)
 
-        # Certifications
-        if resume.certifications:
+        # Certifications & Achievements
+        certs = [x for x in resume.certifications if not _looks_like_award(x.name, x.issuer)]
+        achievements = [x for x in resume.certifications if _looks_like_award(x.name, x.issuer)]
+
+        if certs:
             heading("Certifications")
-            for cert in resume.certifications:
+            for cert in certs:
                 p = doc.add_paragraph(style="List Bullet")
                 p.paragraph_format.space_after = Pt(1)
                 ct = cert.name
                 if cert.issuer: ct += f"  —  {cert.issuer}"
                 if cert.date:   ct += f" ({cert.date})"
+                run(p, ct)
+
+        if achievements:
+            heading("Achievements")
+            for ach in achievements:
+                p = doc.add_paragraph(style="List Bullet")
+                p.paragraph_format.space_after = Pt(1)
+                ct = ach.name
+                if ach.issuer: ct += f"  —  {ach.issuer}"
+                if ach.date:   ct += f" ({ach.date})"
                 run(p, ct)
 
         doc.save(out_path)
@@ -338,13 +354,24 @@ def _build_pdf_pymupdf(resume: ResumeSchema, output_path: str) -> str:
             if proj.technologies: para("Tech: "+", ".join(proj.technologies),8.5,"helv",MUTED,5.0)
             y+=2
 
-    # Certifications
-    if resume.certifications:
+    # Certifications & Achievements
+    certs = [x for x in resume.certifications if not _looks_like_award(x.name, x.issuer)]
+    achievements = [x for x in resume.certifications if _looks_like_award(x.name, x.issuer)]
+
+    if certs:
         sec("Certifications")
-        for cert in resume.certifications:
+        for cert in certs:
             line=f"•  {cert.name}"
             if cert.issuer: line+=f"  —  {cert.issuer}"
             if cert.date:   line+=f" ({cert.date})"
+            para(line,9.0,"helv",DARK)
+
+    if achievements:
+        sec("Achievements")
+        for ach in achievements:
+            line=f"•  {ach.name}"
+            if ach.issuer: line+=f"  —  {ach.issuer}"
+            if ach.date:   line+=f" ({ach.date})"
             para(line,9.0,"helv",DARK)
 
     doc.save(output_path); doc.close()
@@ -385,7 +412,10 @@ def _build_html(resume: ResumeSchema) -> str:
         if p.technologies: proj_html+=f"<br><i style='color:#555;font-size:9pt'>Tech: {esc(', '.join(p.technologies))}</i>"
         proj_html+="</p>"
 
-    cert_html="".join(f"<li>{esc(c.name)}{(' &mdash; '+esc(c.issuer)) if c.issuer else ''}{(' ('+esc(c.date)+')') if c.date else ''}</li>" for c in resume.certifications)
+    certs = [x for x in resume.certifications if not _looks_like_award(x.name, x.issuer)]
+    achievements = [x for x in resume.certifications if _looks_like_award(x.name, x.issuer)]
+    cert_html="".join(f"<li>{esc(c.name)}{(' &mdash; '+esc(c.issuer)) if c.issuer else ''}{(' ('+esc(c.date)+')') if c.date else ''}</li>" for c in certs)
+    ach_html="".join(f"<li>{esc(a.name)}{(' &mdash; '+esc(a.issuer)) if a.issuer else ''}{(' ('+esc(a.date)+')') if a.date else ''}</li>" for a in achievements)
 
     def sec(title,body):
         if not body.strip(): return ""
@@ -401,6 +431,7 @@ def _build_html(resume: ResumeSchema) -> str:
 {sec("Education",edu_html) if edu_html else ""}
 {sec("Projects",proj_html) if proj_html else ""}
 {sec("Certifications",f"<ul>{cert_html}</ul>") if cert_html else ""}
+{sec("Achievements",f"<ul>{ach_html}</ul>") if ach_html else ""}
 </body></html>"""
 
 
@@ -415,3 +446,50 @@ def _fmt_dates(start, end) -> str:
     e = "Present" if end is None else (end.strftime("%b %Y") if hasattr(end,"strftime") else str(end))
     if s and e: return f"{s} – {e}"
     return s or e
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LaTeX renderer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_latex(
+    resume: ResumeSchema,
+    original_path: Optional[str] = None,
+    original_suffix: Optional[str] = None,
+    original_bullets: Optional[dict] = None,
+    original_summary: Optional[str] = None,
+) -> tuple[str, str]:
+    """Generate LaTeX from the resume data and try to compile to PDF.
+
+    Returns a tuple of (output_path, format) where format is "latex" or "pdf".
+    If a LaTeX engine (xelatex/pdflatex) is available, the PDF is compiled
+    and the .pdf path is returned.  Otherwise, the .tex file is saved and
+    the .tex path is returned for the user to compile locally.
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    tex_path = str(OUTPUT_DIR / f"resume_{timestamp}.tex")
+    pdf_path = str(OUTPUT_DIR / f"resume_{timestamp}.pdf")
+
+    # Generate LaTeX source from grounded resume data
+    latex_source = generate_latex(resume)
+    Path(tex_path).write_text(latex_source, encoding="utf-8")
+
+    # Try to compile with xelatex or pdflatex
+    compiled = False
+    for engine in ["xelatex", "pdflatex"]:
+        try:
+            result = subprocess.run(
+                [engine, "-interaction=nonstopmode", "-output-directory",
+                 str(OUTPUT_DIR), tex_path],
+                capture_output=True, text=True, timeout=30
+            )
+            # Check if PDF was produced
+            if result.returncode == 0 and Path(pdf_path).exists():
+                compiled = True
+                return pdf_path, "pdf"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+    # If no LaTeX engine succeeded, return the .tex path
+    if not compiled:
+        return tex_path, "latex"

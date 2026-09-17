@@ -36,15 +36,17 @@ def parse_pdf(path: str) -> ResumeSchema:
 def _clean_pdf_artifacts(text: str) -> str:
     """Strip common PDF extraction artifacts.
 
-    Some PDFs encode bullet characters as '(cid:127)' because the font
-    embeds the bullet at a custom codepoint. pdfplumber passes that
-    through as literal text. Replace those with a real bullet so the
-    rest of the pipeline can detect skills lines and bullets normally.
+    Replaces bullet glyphs and custom font codepoints with standard bullets or dashes,
+    and cleans up common font encoding issues.
     """
-    # (cid:127) is the typical bullet codepoint in embedded fonts
+    # Bullet codepoints in embedded fonts
     text = re.sub(r"\(cid:127\)", "•", text)
-    # Replacement characters from broken Unicode
-    text = text.replace("�", "•")
+    text = text.replace("\xa7", " – ")
+    text = text.replace("\ufffd", " – ")
+    text = text.replace("\u2018", "'").replace("\u2019", "'")
+    text = text.replace("\u201c", '"').replace("\u201d", '"')
+    text = text.replace("\u2013", "–").replace("\u2014", "–")
+    text = re.sub(r"^[ \t]*[•●◆■○▶►▸▪➤→*◦]+[ \t]*", "• ", text, flags=re.M)
     # Strip phone-link artifacts like "n " and " & " that pdfplumber
     # sometimes injects from the contact area
     text = re.sub(r"^[ \t]*[&n][ \t]+", "", text, flags=re.M)
@@ -116,12 +118,14 @@ _SECTION_PATTERNS: dict[str, re.Pattern] = {
         r"academic\s+projects?|key\s+projects?|notable\s+projects?|"
         r"portfolio|selected\s+projects?|open\s+source)\s*$", re.I
     ),
+    "achievements": re.compile(
+        r"^\s*(achievements?|key\s+achievements?|awards?|honors?|"
+        r"honors?\s*(?:&|and)?\s*awards?|awards?\s*(?:&|and)?\s*honors?|"
+        r"accomplishments?|recognitions?|competitions?|hackathons?)\s*$", re.I
+    ),
     "certifications": re.compile(
         r"^\s*(certifications?|certificates?|licenses?|credentials?|"
-        r"awards?\s*(?:&|and)?\s*certifications?|"
-        r"certifications?\s*(?:&|and)?\s*awards?|"
-        r"professional\s+certifications?|achievements?|"
-        r"honors?\s*(?:&|and)?\s*awards?|awards?\s*(?:&|and)?\s*honors?)\s*$", re.I
+        r"professional\s+certifications?|online\s+courses?)\s*$", re.I
     ),
     "languages": re.compile(
         r"^\s*(languages?|spoken\s+languages?|language\s+proficiency)\s*$", re.I
@@ -142,6 +146,9 @@ _DATE_RANGE_RE = re.compile(
     re.I,
 )
 
+_BULLET_CHARS = r"•●◆■○▶►▸▪➤→\-–—*◦"
+_BULLET_RE = re.compile(rf"^[{_BULLET_CHARS}]\s*|^\d+[\.\)]\s*")
+
 _TECH_SKILLS = {
     "Python", "JavaScript", "TypeScript", "Java", "Go", "Rust", "C++", "C#",
     "Ruby", "PHP", "Swift", "Kotlin", "Scala", "R", "MATLAB", "Bash", "Shell",
@@ -149,10 +156,14 @@ _TECH_SKILLS = {
     "Flask", "FastAPI", "Spring", "Rails", "Laravel", "Svelte", "NestJS",
     "AWS", "Azure", "GCP", "Docker", "Kubernetes", "Terraform", "Ansible",
     "PostgreSQL", "MySQL", "MongoDB", "Redis", "Kafka", "Elasticsearch",
-    "GraphQL", "REST", "gRPC", "SQL", "NoSQL", "SQLite",
+    "GraphQL", "REST", "REST API", "gRPC", "SQL", "NoSQL", "SQLite",
     "TensorFlow", "PyTorch", "scikit-learn", "Pandas", "NumPy", "Spark",
-    "Git", "Linux", "Nginx", "Jenkins", "GitHub Actions", "CI/CD",
-    "Agile", "Scrum", "Jira", "Figma",
+    "LangChain", "LLM", "LLMs", "RAG", "NLP", "OpenCV", "YOLO",
+    "Deep Learning", "Machine Learning", "Computer Vision", "CNN", "RNN",
+    "Vector Database", "ChromaDB", "Pinecone", "Weaviate", "Hugging Face",
+    "Transformers", "Keras", "Tailwind", "Microservices", "Raspberry Pi", "IoT",
+    "MLOps", "Prompt Engineering", "Git", "Linux", "Nginx", "Jenkins",
+    "GitHub Actions", "CI/CD", "Agile", "Scrum", "Jira", "Figma",
 }
 
 
@@ -188,11 +199,32 @@ def _extract_structured(text: str) -> ResumeSchema:
     experience    = _extract_experience(sections.get("experience", []))
     education     = _extract_education(sections.get("education", []))
     projects      = _extract_projects(sections.get("projects", []))
-    certifications = _extract_certifications(
+    raw_certs = _extract_certifications(
         sections.get("certifications", []) +
         sections.get("languages", []) +   # keep languages as certs so they appear
         sections.get("interests", [])
     )
+    raw_achs = _extract_certifications(sections.get("achievements", []))
+
+    _ACH_KEYWORDS = (
+        "place", "award", "winner", "win", "won", "hackathon", "selected", "founded",
+        "patent", "published", "rank", "finalist", "prize", "champion", "runner-up",
+        "runner up", "competition", "contest", "medal", "trophy", "scholarship",
+        "fellowship", "merit", "honor", "honour", "innovates", "national", "state-level",
+        "college-level", "ctf", "olympiad", "all india rank",
+    )
+    def _is_ach(entry: CertificationEntry) -> bool:
+        blob = f"{entry.name} {entry.issuer}".lower()
+        return any(k in blob for k in _ACH_KEYWORDS)
+
+    all_items = raw_achs + raw_certs
+    achievements: list[CertificationEntry] = []
+    certifications: list[CertificationEntry] = []
+    for item in all_items:
+        if _is_ach(item):
+            achievements.append(item)
+        else:
+            certifications.append(item)
 
     return ResumeSchema(
         contact=contact,
@@ -202,6 +234,7 @@ def _extract_structured(text: str) -> ResumeSchema:
         education=education,
         projects=projects,
         certifications=certifications,
+        achievements=achievements,
     )
 
 
@@ -212,16 +245,21 @@ def _extract_structured(text: str) -> ResumeSchema:
 def _extract_contact(lines: list[str]) -> ContactInfo:
     full_text = "\n".join(lines)
 
-    # Name: first line that looks like "First [Middle] Last"
+    SECTION_NAMES = {"technical skills", "skills", "experience", "education", "projects", "certifications", "summary", "work experience", "professional summary"}
     name = ""
     for line in lines[:8]:
-        m = re.match(r"^([A-Z][a-zA-Z\-']+(?:\s+[A-Z][a-zA-Z\-']+){1,3})\s*$", line.strip())
-        if m and len(m.group(1)) > 4:
+        s = line.strip()
+        if not s or s.lower() in SECTION_NAMES:
+            continue
+        if "@" in s or "http" in s or ".com" in s or re.search(r"\d{4}", s):
+            continue
+        m = re.match(r"^([A-Z][a-zA-Z\-']+(?:\s+[A-Z][a-zA-Z\-']+){0,3})\s*$", s)
+        if m and len(m.group(1)) >= 3 and m.group(1).lower() not in SECTION_NAMES:
             name = m.group(1).strip()
             break
     if not name:
         m = re.search(r"([A-Z][a-z]+ (?:[A-Z][a-z]+ )?[A-Z][a-z]+)", full_text)
-        if m:
+        if m and m.group(1).lower() not in SECTION_NAMES:
             name = m.group(1).strip()
 
     email_m   = re.search(r"[\w.+-]+@[\w.-]+\.\w{2,}", full_text)
@@ -351,7 +389,7 @@ def _extract_experience(lines: list[str]) -> list[ExperienceEntry]:
             continue
 
         date_match = _DATE_RANGE_RE.search(stripped)
-        is_bullet  = bool(re.match(r"^[•\-–*◦▸▪➤→]", stripped)) or (
+        is_bullet  = bool(_BULLET_RE.match(stripped)) or (
             len(stripped) > 20 and stripped[0].islower() and not date_match
         )
 
@@ -393,7 +431,7 @@ def _extract_experience(lines: list[str]) -> list[ExperienceEntry]:
             if current_entry is not None:
                 bullet_idx += 1
                 exp_ref     = f"exp_{exp_idx + 1}"
-                bullet_text = re.sub(r"^[•\-–*◦▸▪➤→]\s*", "", stripped).strip()
+                bullet_text = _BULLET_RE.sub("", stripped).strip()
                 bullets.append(ExperienceBullet(
                     id=f"{exp_ref}.b{bullet_idx}",
                     text=bullet_text,
@@ -496,25 +534,14 @@ def _extract_education(lines: list[str]) -> list[EducationEntry]:
 def _extract_projects(lines: list[str]) -> list[ProjectEntry]:
     """Extract projects — handles table layout, titled blocks, and bullet lists.
 
-    Three layouts are supported:
-    1. DOCX table layout (marker-based): each row is one project, with the
-       left cell holding date/type and the right cell holding
-       "Title | tag1 · tag2" followed by a multi-line description.
-    2. PDF flat-text 2-column layout: a project line is detected by the
-       presence of " | tag1 · tag2 · tag3" inline, with date/type on the
-       preceding line(s).
-    3. Titled-block layout (fallback): a project name line followed by
-       bullet points or description paragraphs.
+    Supports DOCX tables (marker-based), flat-text 2-column layouts, and
+    titled block layouts with tags and bullet points.
     """
     # ── Path 1: DOCX table layout (marker-based) ───────────────────────────
     if any(l.strip() == "[[TABLE_BEGIN]]" for l in lines):
         return _extract_projects_from_table(lines)
 
-    # ── Path 2: PDF flat-text 2-column layout ──────────────────────────────
-    if any(_looks_like_project_title_line(l) for l in lines):
-        return _extract_projects_from_pdf_layout(lines)
-
-    # ── Path 3: Titled-block / bullet layout (fallback) ────────────────────
+    # ── Path 2: Comprehensive block and bullet layout ──────────────────────
     return _extract_projects_from_blocks(lines)
 
 
@@ -698,10 +725,9 @@ def _extract_projects_from_table(lines: list[str]) -> list[ProjectEntry]:
         if not right_paras:
             continue
 
-        # First non-empty line in the right cell is "Title | tags"
         title_line = right_paras[0]
         name, tags = _split_title_and_tags(title_line)
-        description = " ".join(right_paras[1:]).strip()
+        description = "\n".join(p.strip() for p in right_paras[1:] if p.strip()).strip()
 
         technologies = _extract_tags_as_technologies(tags) if tags else []
         # Also pick up tech keywords that appear in the description
@@ -773,69 +799,136 @@ def _canonicalize_skill_name(tag: str) -> str:
 
 
 def _extract_projects_from_blocks(lines: list[str]) -> list[ProjectEntry]:
-    """Parse projects from the legacy titled-block / bullet format."""
+    """Parse projects from titled blocks, bullet points, and inline tag lines.
+
+    Preserves ALL projects and ALL bullet points/sentences for each project.
+    Handles dates in project titles, tech/role subheadings, and multi-line wrapped bullets.
+    """
     entries: list[ProjectEntry] = []
-    current: Optional[dict]    = None
+    current: Optional[dict] = None
+    bullets: list[str] = []
 
-    # A "project title" line: starts with capital, reasonable length,
-    # not a bullet, not a date range. Accepts em-dash (–), en-dash (—),
-    # and pipe (|) which commonly appear in project titles.
-    title_re = re.compile(r"^[A-Z\[][\w\s\-–—:|\[\]()]{2,90}$")
+    def _is_tech_or_role_line(s: str) -> bool:
+        if re.search(r"\brole:\s*", s, re.I):
+            return True
+        if "·" in s or "•" in s or "|" in s or "," in s:
+            tech_matches = sum(1 for t in _TECH_SKILLS if re.search(r"\b" + re.escape(t) + r"\b", s, re.I))
+            if tech_matches >= 2:
+                return True
+        if re.match(r"^(?:tech(?:nologies)?|tools?|stack)[:\s]", s, re.I):
+            return True
+        return False
 
-    for line in lines:
+    def _looks_like_project_title(s: str, next_s: str = "") -> bool:
+        if bool(_BULLET_RE.match(s)) or _is_tech_or_role_line(s):
+            return False
+        # If line is only dates or punctuation
+        if not re.search(r"[A-Za-z]{2,}", s):
+            return False
+        # Title must start with capital letter, digit or bracket
+        if not re.match(r"^[A-Z0-9\[]", s):
+            return False
+        if len(s) > 110:
+            return False
+        # Check title indicators: separator, date at end, or followed by tech/role/bullet
+        has_date = bool(re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s,]*\d{4}|\b\d{4}\b", s, re.I))
+        has_sep = any(sep in s for sep in ("|", "–", "—", " - ", " · "))
+        is_heading_pattern = bool(next_s and (_is_tech_or_role_line(next_s) or _BULLET_RE.match(next_s)))
+        return has_date or has_sep or is_heading_pattern
+
+    def flush():
+        nonlocal current, bullets
+        if current is not None:
+            current["description"] = "\n".join(bullets).strip()
+            entries.append(ProjectEntry(**current))
+            current = None
+            bullets = []
+
+    for i, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
             continue
 
-        is_bullet = bool(re.match(r"^[•\-–*◦▸▪➤→]", stripped))
-        has_date  = bool(_DATE_RANGE_RE.search(stripped))
+        # Skip section header lines if they appear inside
+        if _SECTION_PATTERNS["projects"].match(stripped):
+            continue
 
-        if title_re.match(stripped) and not is_bullet and not has_date and len(stripped) < 80:
-            if current:
-                entries.append(ProjectEntry(**current))
+        next_line = ""
+        for nxt in lines[i+1:]:
+            if nxt.strip():
+                next_line = nxt.strip()
+                break
+
+        is_bullet = bool(_BULLET_RE.match(stripped))
+
+        if is_bullet:
+            clean_b = _BULLET_RE.sub("", stripped).strip()
+            if current is None:
+                current = {
+                    "name": "Project",
+                    "description": "",
+                    "technologies": [],
+                    "url": "",
+                }
+            if clean_b:
+                bullets.append(clean_b)
+                for tech in _TECH_SKILLS:
+                    if re.search(r"\b" + re.escape(tech) + r"\b", clean_b, re.I):
+                        if tech not in current["technologies"]:
+                            current["technologies"].append(tech)
+
+        elif _looks_like_project_title(stripped, next_line):
+            flush()
+            # Clean title
+            name = stripped
+            tags: list[str] = []
+            if "|" in name:
+                name, tags = _split_title_and_tags(name)
+            name = re.sub(r"\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s,]*\d{4}.*$", "", name, flags=re.I).strip()
+            name = re.sub(r"\s*\d{4}\s*[-–—]\s*(?:present|\d{4}).*$", "", name, flags=re.I).strip()
+            name = re.sub(r"\s+(Personal|Academic|Side Project|Personal Project)$", "", name, flags=re.I).strip()
+            name = _strip_leading_date_range(name)
+            name = re.sub(r"\s+[–—\-]\s+[a-z0-9\-_.]+$", "", name, flags=re.I).strip(" –—-|")
+            name = re.sub(r"\s+[–—\-]\s*$", "", name).strip()
+
             current = {
-                "name":         stripped,
-                "description":  "",
-                "technologies": [],
-                "url":          "",
+                "name": name or stripped[:60],
+                "description": "",
+                "technologies": _extract_tags_as_technologies(tags) if tags else [],
+                "url": "",
             }
-        elif current:
-            bullet_text = re.sub(r"^[•\-–*◦▸▪➤→]\s*", "", stripped).strip()
+            bullets = []
 
-            # URL detection
-            url_m = re.search(r"https?://\S+", stripped)
-            if url_m and not current["url"]:
-                current["url"] = url_m.group()
+        elif _is_tech_or_role_line(stripped):
+            if current is not None:
+                clean_t = re.sub(r"^(?:tech(?:nologies)?|tools?|stack|role)[:\s]+", "", stripped, flags=re.I)
+                raw_tags = [p.strip() for p in re.split(r"[·•|,]", clean_t) if p.strip()]
+                for tag in _extract_tags_as_technologies(raw_tags):
+                    if tag not in current["technologies"]:
+                        current["technologies"].append(tag)
+                for tech in _TECH_SKILLS:
+                    if re.search(r"\b" + re.escape(tech) + r"\b", stripped, re.I):
+                        if tech not in current["technologies"]:
+                            current["technologies"].append(tech)
 
-            # Description (first non-empty body line)
-            if not current["description"] and len(bullet_text) > 10:
-                current["description"] = bullet_text
-
-            # Technology detection from known set
+        elif current is not None and bullets:
+            # Wrapped continuation line of the previous bullet point
+            bullets[-1] += " " + stripped
             for tech in _TECH_SKILLS:
                 if re.search(r"\b" + re.escape(tech) + r"\b", stripped, re.I):
                     if tech not in current["technologies"]:
                         current["technologies"].append(tech)
-        else:
-            # No current project yet — start a loose one from a bullet
-            if is_bullet:
-                bullet_text = re.sub(r"^[•\-–*◦▸▪➤→]\s*", "", stripped).strip()
-                # Use first ~40 chars as project name if no title was found
-                entries.append(ProjectEntry(
-                    name=bullet_text[:50] + ("…" if len(bullet_text) > 50 else ""),
-                    description=bullet_text,
-                    technologies=[],
-                    url="",
-                ))
 
-    if current:
-        entries.append(ProjectEntry(**current))
+        elif current is not None and not bullets:
+            # Descriptive line under project before bullets
+            bullets.append(stripped)
 
+    flush()
     return entries
 
 
 def _extract_certifications(lines: list[str]) -> list[CertificationEntry]:
-    """Extract certifications — each non-empty line becomes one entry."""
+    """Extract certifications and achievements — handles wrapped continuation lines."""
     entries: list[CertificationEntry] = []
     seen: set[str] = set()
 
@@ -843,9 +936,17 @@ def _extract_certifications(lines: list[str]) -> list[CertificationEntry]:
         stripped = line.strip().lstrip("•-–*◦▸▪ ")
         if not stripped or len(stripped) < 3:
             continue
-        # Skip lines that look like section headers already consumed
         if any(pat.match(stripped) for pat in _SECTION_PATTERNS.values()):
             continue
+
+        # If this is a continuation fragment of the previous entry (e.g. "bot." or "design.")
+        if entries:
+            last = entries[-1]
+            words = stripped.split()
+            if (stripped[0].islower() or (len(words) <= 3 and not re.search(r"\b(19|20)\d{2}\b", stripped) and not any(kw in stripped.lower() for kw in ["certif", "course", "award", "finalist", "hackathon", "winner", "place", "ibm", "google", "aws", "deeplearning"]))):
+                last.name = f"{last.name} {stripped}".strip()
+                continue
+
         key = stripped.lower()
         if key in seen:
             continue

@@ -47,3 +47,7 @@ analyze2.json
 resume_id2
 project_index.json
 obs.disconnect()
+*.bak
+test_*.py
+food_tracker.py
+void

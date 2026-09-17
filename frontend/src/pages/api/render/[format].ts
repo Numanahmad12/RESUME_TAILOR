@@ -17,9 +17,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  if (format !== 'pdf' && format !== 'docx') {
-    return res.status(400).json({ error: 'Format must be pdf or docx' });
-  }
+if (format !== 'pdf' && format !== 'docx' && format !== 'latex') {
+    return res.status(400).json({ error: 'Format must be pdf, docx, or latex' });
+}
 
   // Collect raw request body
   const chunks: Buffer[] = [];
@@ -41,7 +41,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(backendRes.status).json({ error: err });
     }
 
-    const defaultType = format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const defaultType = format === 'pdf' ? 'application/pdf' : format === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'text/plain';
     const backendContentType = backendRes.headers.get('content-type') ?? defaultType;
     const disposition = backendRes.headers.get('content-disposition') ?? `attachment; filename="tailored_resume.${format}"`;
 

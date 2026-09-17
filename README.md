@@ -1,13 +1,41 @@
-# ResumeAI — AI-Powered Resume Tailoring Engine
+# ResumeAI — AI-Powered Resume Tailoring Engine with RAG Pipeline
 
-An 8-stage AI pipeline that scores, generates, validates, and renders a perfectly tailored resume for any job description — with zero hallucinations.
+An AI-powered resume tailoring engine with a **RAG (Retrieval-Augmented Generation)** pipeline that uses sentence-transformers embeddings + Gemini LLM to create perfectly tailored resumes for any job description.
 
 ## Architecture
 
-- **Frontend**: Next.js 14 (React 18, Tailwind CSS, Framer Motion, GSAP, react-three-fiber)
+- **Frontend**: Next.js 14 (React 18, Tailwind CSS, Framer Motion)
 - **Backend**: FastAPI (Python 3.12+)
-- **Pipeline**: parse → analyze JD → compute match → generate patches → validate → review → render → export
-- **Output**: DOCX (python-docx) and PDF (PyMuPDF) with WeasyPrint + HTML fallback
+- **Pipeline**: parse → RAG embed → retrieve → LLM draft → LaTeX → PDF
+- **RAG Pipeline**: sentence-transformers embeddings + in-memory vector store + Gemini LLM
+- **Output**: PDF (WeasyPrint HTML→PDF), LaTeX source, Markdown
+- **LLM**: Google Gemini (gemini-1.5-flash) with RAG context retrieval
+
+## New RAG Pipeline (Recommended)
+
+The pipeline now uses a **Retrieval-Augmented Generation** approach:
+
+1. **Extract** — Parse resume (PDF/DOCX) and JD into structured data
+2. **Embed** — Use `sentence-transformers` (`all-MiniLM-L6-v2`) to create embeddings of all resume sections and JD requirements
+3. **Retrieve** — Perform cosine similarity search to find the most relevant chunks from the resume and JD
+4. **Augment** — Build a comprehensive prompt with retrieved RAG context
+5. **Draft** — Send to Gemini LLM to draft a completely new, tailored resume in markdown
+6. **Convert** — Convert markdown → styled HTML → PDF (via WeasyPrint) or LaTeX source
+
+### RAG Pipeline Endpoint
+
+```
+POST /api/rag-pipeline
+Body: { resume_id, jd_id, format: "pdf" | "latex" | "markdown", top_k: 8 }
+Response: PDF file or LaTeX source
+```
+
+### Legacy Pipeline (Still Available)
+
+```
+POST /api/generate-tailored  # Legacy LLM pipeline (kept for backward compatibility)
+POST /api/rag-pipeline/status  # Check RAG pipeline availability
+```
 
 ## Local Development
 
@@ -15,70 +43,44 @@ An 8-stage AI pipeline that scores, generates, validates, and renders a perfectl
 
 ```bash
 # From repo root
-PYTHONPATH="backend/src:." python -m uvicorn backend.src.api.app:app --reload --port 8000
+$env:PYTHONPATH="backend/src;."; python -m uvicorn backend.src.api.app:app --host 127.0.0.1 --port 8000
 ```
 
-The backend uses **relative imports** (`from ..services...`), so the project root and `backend/src` both need to be on `PYTHONPATH` to resolve the `common/` shared schema package.
+The backend uses relative imports (`from ..services...`), so `backend/src` needs to be on `PYTHONPATH`.
 
 ### Frontend
 
 ```bash
 cd frontend
 npm install
-npm run dev   # development with HMR
-# or
-npm run build && npm run start  # production
+npm run dev
 ```
 
-The frontend proxies `/api/*` → `http://localhost:8000/api/*` (configured in `frontend/next.config.js`).
+The frontend proxies `/api/*` → `http://localhost:8000/api/*`.
 
-## Deployment
+### Environment Setup
 
-See `DEPLOY.md` for the Vercel + GitHub deployment steps.
+Copy `.env.example` to `.env` and add your Gemini API key:
 
-## Project Structure
-
+```bash
+cp .env.example .env
+# Edit .env and add: GEMINI_API_KEY=AIzaSy...
 ```
-.
-├── backend/
-│   ├── src/
-│   │   ├── api/app.py          # FastAPI endpoints
-│   │   ├── services/           # Pipeline services
-│   │   │   ├── resume_parser.py
-│   │   │   ├── jd_analyzer.py
-│   │   │   ├── gap_analyzer.py
-│   │   │   ├── generator.py
-│   │   │   ├── validator.py
-│   │   │   └── renderer.py
-│   │   └── models/resume.py    # Pydantic schemas
-│   └── tests/
-├── common/                     # Shared schema (used by backend)
-│   └── schema/resume.py
-├── frontend/
-│   ├── src/
-│   │   ├── pages/
-│   │   │   ├── index.tsx       # Landing page
-│   │   │   ├── tool.tsx        # Resume tailoring tool
-│   │   │   └── api/            # API proxy routes
-│   │   ├── components/
-│   │   │   ├── ResumeTailorForm.tsx
-│   │   │   └── landing/        # Landing page sections
-│   │   ├── styles/globals.css
-│   │   └── hooks/
-│   ├── package.json
-│   └── next.config.js
-├── scripts/                    # Test scripts
-├── vercel.json                 # Vercel config
-└── README.md
-```
+
+## Dependencies
+
+All Python dependencies are in `requirements.txt`. Key new additions:
+- `weasyprint` — HTML→PDF rendering (replaces xelatex/pdflatex)
+- `sentence-transformers` — RAG embeddings
+- `pgvector` — Vector database (optional, for production)
+- `google-generativeai` — Gemini LLM client
+- `markdown` — Markdown→HTML conversion
 
 ## Pipeline Stages
 
-1. **Ingestion** — PDF and DOCX parsing with structure recovery (tables, bullet lists, section headers)
-2. **JD Analysis** — Required vs. preferred skills, years of experience, and responsibilities
-3. **Gap Analysis** — Five sub-scores: keyword coverage, experience fit, responsibility alignment, impact, formatting
-4. **Generation** — Heuristic patch generator rewrites the summary, reorders skills, upgrades weak bullets
-5. **Validation** — Every patch is checked against the original resume
-6. **Review** — Side-by-side diff. Accept, edit, or reject before commit
-7. **Rendering** — Clean DOCX and PDF output
-8. **Export** — Download the tailored resume
+1. **Ingestion** — PDF and DOCX parsing with structure recovery
+2. **RAG Embedding** — Sentence-transformers create vector embeddings of resume sections and JD
+3. **Context Retrieval** — Cosine similarity search finds top-k relevant chunks
+4. **LLM Drafting** — Gemini generates a new resume using RAG-augmented prompt
+5. **PDF Conversion** — Markdown→HTML→PDF via WeasyPrint
+6. **Export** — Download PDF, LaTeX, or Markdown output
