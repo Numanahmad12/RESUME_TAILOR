@@ -386,8 +386,13 @@ def _build_html(resume: ResumeSchema) -> str:
     def esc(s):
         return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
-    cparts=[esc(resume.contact.email),esc(resume.contact.phone)]+[f'<a href="https://{esc(l)}">{esc(l)}</a>' for l in (resume.contact.links or [])]
-    contact_html="  |  ".join(p for p in cparts if p)
+    link_html = []
+    for l in (resume.contact.links or []):
+        url = l if l.startswith(("http://", "https://")) else f"https://{l}"
+        clean_lbl = re.sub(r"^https?://(?:www\.)?", "", l).rstrip("/")
+        link_html.append(f'<a href="{esc(url)}">{esc(clean_lbl)}</a>')
+    cparts = [p for p in [esc(resume.contact.email), esc(resume.contact.phone)] + link_html if p]
+    contact_html = "  |  ".join(cparts)
 
     skill_html=""
     if resume.skills:

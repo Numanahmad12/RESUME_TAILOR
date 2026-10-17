@@ -165,6 +165,20 @@ _LATEX_PREAMBLE = r"""\documentclass[letterpaper,11pt]{article}
 """
 
 
+def _format_link_label(link: str) -> str:
+    """Extract a clean, readable label for hyperlinks."""
+    clean = re.sub(r"^https?://(?:www\.)?", "", link).rstrip("/")
+    if "linkedin.com" in link.lower():
+        m = re.search(r"linkedin\.com/(?:in/)?([a-zA-Z0-9_\-]+)", link, re.I)
+        return f"LinkedIn/{m.group(1)}" if m else "LinkedIn"
+    if "github.com" in link.lower():
+        m = re.search(r"github\.com/([a-zA-Z0-9_\-]+)", link, re.I)
+        return f"GitHub/{m.group(1)}" if m else "GitHub"
+    if any(k in link.lower() for k in ["portfolio", "v0-", ".vercel.app", ".netlify.app", ".xyz", ".dev", ".me"]):
+        return "Portfolio" if len(clean) > 22 else clean
+    return clean
+
+
 def render_jakes_latex(resume: ResumeSchema) -> str:
     """Render the full Jake-style LaTeX document for a resume."""
     c = resume.contact
@@ -177,10 +191,13 @@ def render_jakes_latex(resume: ResumeSchema) -> str:
     if c.phone:
         contact_bits.append(_tex(c.phone))
     if c.email:
-        contact_bits.append(f"\\href{{mailto:{_tex(c.email)}}}{{{_tex(c.email)}}}")
+        clean_email = c.email.strip()
+        contact_bits.append(f"\\href{{mailto:{clean_email}}}{{{_tex(clean_email)}}}")
     for link in c.links or []:
-        label = re.sub(r"^https?://", "", link).rstrip("/")
-        contact_bits.append(f"\\href{{{_tex(link)}}}{{{_tex(label)}}}")
+        clean_url = link if link.startswith(("http://", "https://", "mailto:")) else f"https://{link}"
+        label = _format_link_label(link)
+        url_escaped = clean_url.replace("%", "\\%").replace("#", "\\#")
+        contact_bits.append(f"\\href{{{url_escaped}}}{{{_tex(label)}}}")
     if contact_bits:
         parts.append(" \n" + " $|$ ".join(contact_bits))
     parts.append(r"\end{center}")
@@ -223,9 +240,13 @@ def render_jakes_latex(resume: ResumeSchema) -> str:
         parts.append(r"\resumeSubHeadingListStart")
         for proj in projs:
             techs = f" $|$ \\emph{{{', '.join(_tex(t) for t in proj.technologies)}}}" if proj.technologies else ""
+            link_tex = ""
+            if proj.url:
+                link_label = "GitHub" if "github.com" in proj.url.lower() else "Link"
+                link_tex = f" $|$ \\href{{{_tex(proj.url)}}}{{\\underline{{{link_label}}}}}"
             parts.append(
                 "\\resumeProjectHeading"
-                f"{{\\textbf{{{_tex(proj.name)}}}{techs}}}{{}}"
+                f"{{\\textbf{{{_tex(proj.name)}}}{link_tex}{techs}}}{{}}"
             )
             parts.append(r"\resumeItemListStart")
             bullets = _split_sentences(proj.description)[:3] or [""]
@@ -394,9 +415,17 @@ def render_jakes_pdf(resume: ResumeSchema, pdf_path: str) -> str:
         story = []
         c = resume.contact
         story.append(Paragraph(_rl(c.name or "Resume"), s_name))
-        contact_bits = [x for x in [c.phone, c.email, *(c.links or [])] if x]
+        contact_bits = []
+        if c.phone:
+            contact_bits.append(_rl(c.phone))
+        if c.email:
+            contact_bits.append(f'<a href="mailto:{_rl(c.email)}" color="#0b4f8a"><u>{_rl(c.email)}</u></a>')
+        for link in (c.links or []):
+            clean_url = link if link.startswith(("http://", "https://")) else f"https://{link}"
+            label = _format_link_label(link)
+            contact_bits.append(f'<a href="{_rl(clean_url)}" color="#0b4f8a"><u>{_rl(label)}</u></a>')
         if contact_bits:
-            story.append(Paragraph(_rl(" · ".join(contact_bits)), s_contact))
+            story.append(Paragraph(" · ".join(contact_bits), s_contact))
 
         if resume.summary and resume.summary.strip():
             story += section("Professional Summary")
@@ -424,7 +453,12 @@ def render_jakes_pdf(resume: ResumeSchema, pdf_path: str) -> str:
             story += section("Projects")
             for proj in projs:
                 techs = f" | <i>{_rl(', '.join(proj.technologies))}</i>" if proj.technologies else ""
-                story.append(row(f"<b>{_rl(proj.name)}</b>{techs}", ""))
+                if proj.url:
+                    link_label = "GitHub" if "github.com" in proj.url.lower() else "Link"
+                    proj_head = f"<b>{_rl(proj.name)}</b> | <a href='{_rl(proj.url)}' color='#0b4f8a'><u>[{link_label}]</u></a>{techs}"
+                else:
+                    proj_head = f"<b>{_rl(proj.name)}</b>{techs}"
+                story.append(row(proj_head, ""))
                 bullets = _split_sentences(proj.description)[:max_proj_bullets]
                 for sent in bullets:
                     story.append(Paragraph(_rl(sent), s_bullet, bulletText="•"))
@@ -520,9 +554,19 @@ def _rl(text: str) -> str:
 def resume_to_markdown(resume: ResumeSchema) -> str:
     """Render the tailored resume as clean markdown (same section order)."""
     c = resume.contact
+    contact_parts = []
+    if c.phone:
+        contact_parts.append(c.phone)
+    if c.email:
+        contact_parts.append(f"[{c.email}](mailto:{c.email})")
+    for link in c.links or []:
+        clean_url = link if link.startswith(("http://", "https://", "mailto:")) else f"https://{link}"
+        label = _format_link_label(link)
+        contact_parts.append(f"[{label}]({clean_url})")
+
     lines = [
         f"# {c.name}",
-        " · ".join(x for x in [c.phone, c.email, *(c.links or [])] if x),
+        " · ".join(contact_parts),
         "",
     ]
     if resume.summary and resume.summary.strip():
@@ -544,7 +588,11 @@ def resume_to_markdown(resume: ResumeSchema) -> str:
         lines.append("## Projects")
         for proj in resume.projects:
             techs = f" | {', '.join(proj.technologies)}" if proj.technologies else ""
-            lines.append(f"**{proj.name}**{techs}")
+            link_md = ""
+            if proj.url:
+                link_label = "GitHub" if "github.com" in proj.url.lower() else "Link"
+                link_md = f" | [{link_label}]({proj.url})"
+            lines.append(f"**{proj.name}**{link_md}{techs}")
             for sent in _split_sentences(proj.description) or []:
                 lines.append(f"- {sent}")
         lines.append("")

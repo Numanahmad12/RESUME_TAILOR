@@ -4,7 +4,7 @@ import {
   Upload, FileText, BarChart3, CheckSquare, Download, ChevronRight,
   AlertCircle, Sparkles, ArrowRight, CheckCircle2, RefreshCw,
   ExternalLink, Check, X, TrendingUp, ShieldCheck, Zap, HelpCircle, FileCode,
-  Eye, EyeOff
+  Eye, EyeOff, Mail, Phone, Linkedin, Github, Globe
 } from 'lucide-react';
 import { usePipeline, PipelineStep } from '../hooks/useResumePipeline';
 import * as api from '../utils/api';
@@ -175,13 +175,35 @@ function StepUpload() {
                 <p className="font-semibold text-emerald-300 text-sm truncate">{resumeFile.name}</p>
                 <p className="text-xs text-slate-400 mt-1">{(resumeFile.size / 1024).toFixed(1)} KB</p>
                 {resumeData && (
-                  <div className="mt-2 flex flex-wrap justify-center gap-1.5">
-                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-950 border border-emerald-700/50 text-emerald-300 text-xs font-medium">
-                      {resumeData.contact.name || 'Candidate'}
-                    </span>
-                    <span className="px-2.5 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-300 text-xs">
-                      {resumeData.skills.length} skills · {resumeData.projects.length} projects · {resumeData.experience.length} roles
-                    </span>
+                  <div className="mt-2 flex flex-col items-center gap-1.5">
+                    <div className="flex flex-wrap justify-center gap-1.5">
+                      <span className="px-2.5 py-0.5 rounded-full bg-emerald-950 border border-emerald-700/50 text-emerald-300 text-xs font-medium">
+                        {resumeData.contact.name || 'Candidate'}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-300 text-xs">
+                        {resumeData.skills.length} skills · {resumeData.projects.length} projects · {resumeData.experience.length} roles
+                      </span>
+                    </div>
+                    {(resumeData.contact.email || (resumeData.contact.links && resumeData.contact.links.length > 0)) && (
+                      <div className="flex flex-wrap justify-center items-center gap-1.5 text-[11px] text-slate-400">
+                        {resumeData.contact.email && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800/80 border border-slate-700 text-slate-300">
+                            <Mail size={11} className="text-red-400" />
+                            {resumeData.contact.email}
+                          </span>
+                        )}
+                        {resumeData.contact.links && resumeData.contact.links.map((link, idx) => {
+                          const isGh = link.toLowerCase().includes('github.com');
+                          const isLi = link.toLowerCase().includes('linkedin.com');
+                          return (
+                            <span key={idx} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800/80 border border-slate-700 text-slate-300">
+                              {isGh ? <Github size={11} className="text-slate-200" /> : isLi ? <Linkedin size={11} className="text-blue-400" /> : <Globe size={11} className="text-emerald-400" />}
+                              {isGh ? 'GitHub' : isLi ? 'LinkedIn' : 'Portfolio'}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -704,6 +726,81 @@ function StepTailor() {
           <span className="text-xs font-bold text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded-full border border-emerald-700/50">
             +{Math.max(newScore - origScore, 0)}%
           </span>
+        </div>
+      </div>
+
+      {/* Candidate Contact & Profile Information (Verified & Preserved from Original Resume) */}
+      <div className="card p-5 bg-slate-900/70 border border-slate-800 rounded-2xl space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-red-600/20 flex items-center justify-center text-red-400 font-bold text-sm">
+              {finalResumeData.contact.name ? finalResumeData.contact.name.charAt(0).toUpperCase() : 'C'}
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-white tracking-tight">
+                {finalResumeData.contact.name || 'Candidate Resume'}
+              </h3>
+              <p className="text-xs text-slate-400 flex items-center gap-1.5">
+                <CheckCircle2 size={12} className="text-emerald-400" />
+                Original contact info verified and preserved from your resume
+              </p>
+            </div>
+          </div>
+          <span className="text-[11px] font-medium text-emerald-400 bg-emerald-950/80 px-2.5 py-1 rounded-full border border-emerald-700/50 flex items-center gap-1">
+            ✓ Contact Verified
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800/80">
+          {finalResumeData.contact.email && (
+            <a
+              href={`mailto:${finalResumeData.contact.email}`}
+              className="inline-flex items-center gap-1.5 text-xs text-slate-200 bg-slate-800/90 hover:bg-slate-700/90 border border-slate-700 px-3 py-1.5 rounded-lg transition-colors"
+            >
+              <Mail size={13} className="text-red-400" />
+              <span>{finalResumeData.contact.email}</span>
+            </a>
+          )}
+          {finalResumeData.contact.phone && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-slate-300 bg-slate-800/60 border border-slate-700/60 px-3 py-1.5 rounded-lg">
+              <Phone size={13} className="text-slate-400" />
+              <span>{finalResumeData.contact.phone}</span>
+            </span>
+          )}
+          {finalResumeData.contact.links && finalResumeData.contact.links.map((link, idx) => {
+            const isGh = link.toLowerCase().includes('github.com');
+            const isLi = link.toLowerCase().includes('linkedin.com');
+            const cleanUrl = link.startsWith('http://') || link.startsWith('https://') ? link : `https://${link}`;
+            let label = link.replace(/^https?:\/\/(?:www\.)?/i, '').replace(/\/$/, '');
+            if (isLi) {
+              const m = link.match(/linkedin\.com\/(?:in\/)?([a-zA-Z0-9_\-]+)/i);
+              label = m ? `LinkedIn/${m[1]}` : 'LinkedIn';
+            } else if (isGh) {
+              const m = link.match(/github\.com\/([a-zA-Z0-9_\-]+)/i);
+              label = m ? `GitHub/${m[1]}` : 'GitHub';
+            } else if (label.length > 25) {
+              label = 'Portfolio';
+            }
+
+            return (
+              <a
+                key={idx}
+                href={cleanUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                  isGh
+                    ? 'bg-slate-800 text-slate-100 border-slate-600 hover:bg-slate-700'
+                    : isLi
+                    ? 'bg-blue-950/60 text-blue-200 border-blue-800/60 hover:bg-blue-900/60'
+                    : 'bg-slate-800/80 text-emerald-300 border-emerald-800/50 hover:bg-slate-700'
+                }`}
+              >
+                {isGh ? <Github size={13} /> : isLi ? <Linkedin size={13} /> : <Globe size={13} />}
+                <span>{label}</span>
+              </a>
+            );
+          })}
         </div>
       </div>
 

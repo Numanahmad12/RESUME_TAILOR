@@ -204,14 +204,19 @@ def generate_latex(resume: ResumeSchema) -> str:
 
     # Contact info
     contact_parts: list[str] = []
-    if resume.contact.email:
-        contact_parts.append(resume.contact.email)
     if resume.contact.phone:
-        contact_parts.append(resume.contact.phone)
-    contact_parts.extend(resume.contact.links or [])
-    contact_str = " ".join(_to_latex(c) for c in contact_parts if c)
-    if contact_str:
-        parts.append(contact_str)
+        contact_parts.append(_to_latex(resume.contact.phone))
+    if resume.contact.email:
+        em = resume.contact.email.strip()
+        contact_parts.append(f"\\href{{mailto:{em}}}{{{_to_latex(em)}}}")
+    for link in (resume.contact.links or []):
+        url = link if link.startswith(("http://", "https://", "mailto:")) else f"https://{link}"
+        from .jakes_template import _format_link_label
+        label = _format_link_label(link)
+        url_escaped = url.replace("%", "\\%").replace("#", "\\#")
+        contact_parts.append(f"\\href{{{url_escaped}}}{{{_to_latex(label)}}}")
+    if contact_parts:
+        parts.append(r"\begin{center}\small " + " $|$ ".join(contact_parts) + r"\normalsize\end{center}")
     parts.append("")  # blank line
 
     # Professional Summary

@@ -2,6 +2,7 @@
 import re
 from datetime import date
 from typing import Optional
+from urllib.parse import urlparse
 
 from ..models.resume import (
     ResumeSchema, ContactInfo, Skill, ExperienceBullet,
@@ -12,6 +13,240 @@ from ..models.resume import (
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
+
+def _extract_pdf_links(path: str) -> list[dict]:
+    """Extract hyperlinks, anchor text, and vertical positions from a PDF.
+
+    Returns a list of dicts: {'uri': str, 'text': str, 'page': int, 'top': float, 'bottom': float}
+    """
+    links: list[dict] = []
+
+    # Fast path: pymupdf (fitz) accurately captures hyperlinks and bounding boxes
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        try:
+            import fitz
+        except ImportError:
+            fitz = None
+
+    if fitz is not None:
+        try:
+            doc = fitz.open(path)
+            for page_idx, page in enumerate(doc):
+                for l in page.get_links():
+                    uri = l.get("uri")
+                    if not uri:
+                        continue
+                    rect = l.get("from")
+                    anchor_text = ""
+                    if rect:
+                        try:
+                            anchor_text = page.get_textbox(rect).strip()
+                        except Exception:
+                            pass
+                    top = rect.y0 if rect else 0.0
+                    bottom = rect.y1 if rect else 0.0
+                    links.append({
+                        "uri": uri.strip(),
+                        "text": anchor_text,
+                        "page": page_idx,
+                        "top": top,
+                        "bottom": bottom,
+                    })
+            if links:
+                return links
+        except Exception:
+            pass
+
+    # Fallback path: pdfplumber
+    try:
+        import pdfplumber
+        with pdfplumber.open(path) as pdf:
+            for page_idx, page in enumerate(pdf.pages):
+                for l in getattr(page, "hyperlinks", []) or []:
+                    uri = l.get("uri")
+                    if not uri:
+                        continue
+                    top = float(l.get("top", 0) or 0)
+                    bottom = float(l.get("bottom", 0) or 0)
+                    x0 = float(l.get("x0", 0) or 0)
+                    x1 = float(l.get("x1", 0) or 0)
+                    anchor_text = ""
+                    try:
+                        cropped = page.crop((x0, top, x1, bottom))
+                        t = cropped.extract_text()
+                        if t:
+                            anchor_text = t.strip()
+                    except Exception:
+                        pass
+                    links.append({
+                        "uri": uri.strip(),
+                        "text": anchor_text,
+                        "page": page_idx,
+                        "top": top,
+                        "bottom": bottom,
+                    })
+    except Exception:
+        pass
+
+    return links
+
+
+def _extract_docx_links(doc) -> list[dict]:
+    """Extract hyperlinks from python-docx Document relationships."""
+    links: list[dict] = []
+    try:
+        for rel in doc.part.rels.values():
+            if "hyperlink" in getattr(rel, "reltype", ""):
+                target = getattr(rel, "target_ref", "")
+                if target:
+                    links.append({
+                        "uri": target.strip(),
+                        "text": "",
+                        "page": 0,
+                        "top": 0.0,
+                        "bottom": 0.0,
+                    })
+    except Exception:
+        pass
+    return links
+
+
+def _enrich_resume_with_links(resume: ResumeSchema, extracted_links: list[dict]) -> ResumeSchema:
+    """Associate extracted hyperlink annotations with Contact, Projects, and Certifications."""
+    if not extracted_links:
+        return resume
+
+    def norm(u: str) -> str:
+        return re.sub(r"^https?://", "", u).rstrip("/").lower()
+
+    # 1. Project URL matching
+    project_urls: set[str] = set()
+    for proj in resume.projects:
+        p_name_clean = re.sub(r"[^a-zA-Z0-9]", "", proj.name).lower()
+        p_words = [re.sub(r"[^a-zA-Z0-9]", "", w).lower() for w in re.split(r"[\s\-_|·•]+", proj.name) if len(w) >= 3]
+        for item in extracted_links:
+            uri = item.get("uri", "").strip()
+            if not uri or uri.lower().startswith("mailto:"):
+                continue
+            anchor_txt = item.get("text", "").strip()
+            anchor_clean = re.sub(r"[^a-zA-Z0-9]", "", anchor_txt).lower()
+
+            parsed = urlparse(uri)
+            path_parts = [x for x in parsed.path.split("/") if x]
+            last_part = re.sub(r"[^a-zA-Z0-9]", "", path_parts[-1]).lower() if path_parts else ""
+
+            matched = False
+            if p_name_clean and (p_name_clean in anchor_clean or (len(anchor_clean) > 4 and anchor_clean in p_name_clean)):
+                matched = True
+            elif last_part and (last_part in p_name_clean or (len(last_part) > 4 and last_part in p_name_clean)):
+                matched = True
+            elif any(len(w) > 4 and w in anchor_clean for w in p_words):
+                matched = True
+            elif proj.description and (uri in proj.description or (len(anchor_clean) > 5 and anchor_clean in proj.description.lower())):
+                matched = True
+
+            if matched:
+                if not proj.url:
+                    proj.url = uri
+                project_urls.add(norm(uri))
+
+    # Also check if project description explicitly mentions a raw URL
+    for proj in resume.projects:
+        if not proj.url and proj.description:
+            m = re.search(r"https?://[^\s,;()<>]+", proj.description)
+            if m:
+                proj.url = m.group().rstrip(".")
+                project_urls.add(norm(proj.url))
+
+    # 2. Contact Email & Links
+    seen_contact = {norm(l) for l in resume.contact.links}
+    SOCIAL_DOMAINS = (
+        "linkedin.com", "github.com", "gitlab.com", "twitter.com", "x.com",
+        "leetcode.com", "medium.com", "kaggle.com", "huggingface.co", "behance.net", "dribbble.com"
+    )
+
+    for item in extracted_links:
+        uri = item.get("uri", "").strip()
+        if not uri:
+            continue
+
+        full_uri = uri if uri.startswith(("http://", "https://", "mailto:")) else f"https://{uri}"
+
+        # Email link
+        if full_uri.lower().startswith("mailto:"):
+            email_val = full_uri[7:].split("?")[0].strip().rstrip(".,;")
+            if email_val and (not resume.contact.email or "@" not in resume.contact.email):
+                resume.contact.email = email_val
+            continue
+        elif "@" in full_uri and not full_uri.lower().startswith("http"):
+            email_val = full_uri.split("?")[0].strip().rstrip(".,;")
+            if email_val and (not resume.contact.email or "@" not in resume.contact.email):
+                resume.contact.email = email_val
+            continue
+
+        clean_key = norm(full_uri)
+        if clean_key in project_urls:
+            continue
+
+        parsed = urlparse(full_uri)
+        path_parts = [x for x in parsed.path.split("/") if x]
+
+        # Check if this is a repository URL (e.g. github.com/user/repo) vs user profile
+        is_gh_repo = "github.com" in parsed.netloc.lower() and len(path_parts) >= 2
+        if is_gh_repo:
+            continue
+
+        anchor_txt = item.get("text", "").lower()
+        top_y = item.get("top", 999)
+        page_num = item.get("page", 0)
+        is_header = page_num == 0 and top_y < 280
+        is_social = any(d in parsed.netloc.lower() for d in SOCIAL_DOMAINS)
+        is_contact_anchor = any(w in anchor_txt for w in ["portfolio", "github", "linkedin", "website", "site", "blog", "contact"])
+
+        if is_social or is_contact_anchor or is_header:
+            if clean_key not in seen_contact:
+                resume.contact.links.append(full_uri)
+                seen_contact.add(clean_key)
+
+    # 3. Certifications URL enrichment
+    for cert in resume.certifications:
+        if not cert.url:
+            c_name_clean = re.sub(r"[^a-zA-Z0-9]", "", cert.name).lower()
+            for item in extracted_links:
+                uri = item.get("uri", "").strip()
+                if not uri or uri.lower().startswith("mailto:"):
+                    continue
+                full_uri = uri if uri.startswith(("http://", "https://")) else f"https://{uri}"
+                if norm(full_uri) in project_urls or norm(full_uri) in seen_contact:
+                    continue
+                anchor_txt = item.get("text", "").strip()
+                anchor_clean = re.sub(r"[^a-zA-Z0-9]", "", anchor_txt).lower()
+                if c_name_clean and (c_name_clean in anchor_clean or (len(anchor_clean) > 4 and anchor_clean in c_name_clean)):
+                    cert.url = full_uri
+                    break
+
+    # Normalize all resume.contact.links to start with https:// and remove any duplicates
+    deduped_links: list[str] = []
+    dedup_seen: set[str] = set()
+    for l in resume.contact.links:
+        if not l:
+            continue
+        if "@" in l and not any(k in l.lower() for k in [".com/", ".org/", ".io/", ".net/"]):
+            clean_em = re.sub(r"^(?:mailto:)?", "", l).strip()
+            if not resume.contact.email:
+                resume.contact.email = clean_em
+            continue
+        proper_url = l if l.startswith(("http://", "https://")) else f"https://{l}"
+        k = norm(proper_url)
+        if k and k not in dedup_seen:
+            dedup_seen.add(k)
+            deduped_links.append(proper_url)
+    resume.contact.links = deduped_links
+
+    return resume
+
 
 def parse_pdf(path: str) -> ResumeSchema:
     try:
@@ -30,7 +265,9 @@ def parse_pdf(path: str) -> ResumeSchema:
             if t:
                 full_text += t + "\n"
     full_text = _clean_pdf_artifacts(full_text)
-    return _extract_structured(full_text)
+    extracted_links = _extract_pdf_links(path)
+    resume = _extract_structured(full_text)
+    return _enrich_resume_with_links(resume, extracted_links)
 
 
 def _clean_pdf_artifacts(text: str) -> str:
@@ -87,7 +324,9 @@ def parse_docx(path: str) -> ResumeSchema:
                     break
             chunks.append("[[TABLE_END]]")
     full_text = "\n".join(chunks)
-    return _extract_structured(full_text)
+    extracted_links = _extract_docx_links(doc)
+    resume = _extract_structured(full_text)
+    return _enrich_resume_with_links(resume, extracted_links)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +413,7 @@ _TECH_SKILLS = {
 def _extract_structured(text: str) -> ResumeSchema:
     lines = text.splitlines()
 
-    contact = _extract_contact(lines[:20])
+    contact = _extract_contact(lines, full_text=text)
 
     # Segment lines into named sections
     sections: dict[str, list[str]] = {"header": []}
@@ -242,42 +481,137 @@ def _extract_structured(text: str) -> ResumeSchema:
 # Section extractors
 # ---------------------------------------------------------------------------
 
-def _extract_contact(lines: list[str]) -> ContactInfo:
-    full_text = "\n".join(lines)
+def _normalize_web_url(u: str) -> str:
+    """Normalize a web URL to start with https:// and strip trailing punctuation/slash."""
+    u = u.strip().rstrip(".,;)>]}'\"")
+    if not u:
+        return ""
+    if u.lower().startswith("mailto:"):
+        return u
+    if not u.lower().startswith(("http://", "https://")):
+        u = f"https://{u}"
+    return u
 
-    SECTION_NAMES = {"technical skills", "skills", "experience", "education", "projects", "certifications", "summary", "work experience", "professional summary"}
+
+def _extract_contact(lines: list[str], full_text: str = "") -> ContactInfo:
+    if not full_text:
+        full_text = "\n".join(lines)
+    header_text = "\n".join(lines[:35])
+
+    SECTION_NAMES = {
+        "technical skills", "skills", "experience", "education", "projects",
+        "certifications", "summary", "work experience", "professional summary",
+        "about me", "profile", "objective", "employment", "achievements",
+    }
+
+    # 1. Name extraction from topmost lines
     name = ""
-    for line in lines[:8]:
+    for line in lines[:10]:
         s = line.strip()
         if not s or s.lower() in SECTION_NAMES:
             continue
         if "@" in s or "http" in s or ".com" in s or re.search(r"\d{4}", s):
             continue
-        m = re.match(r"^([A-Z][a-zA-Z\-']+(?:\s+[A-Z][a-zA-Z\-']+){0,3})\s*$", s)
+        s_clean = re.sub(r"^[•●◆■○▶►▸▪➤→*◦✆✉☎📱📧🔗🌐💻\s\-–—|/]+", "", s).strip()
+        m = re.match(r"^([A-Z][a-zA-Z\-']+(?:\s+[A-Z][a-zA-Z\-']+){0,3})\s*$", s_clean)
         if m and len(m.group(1)) >= 3 and m.group(1).lower() not in SECTION_NAMES:
             name = m.group(1).strip()
             break
     if not name:
-        m = re.search(r"([A-Z][a-z]+ (?:[A-Z][a-z]+ )?[A-Z][a-z]+)", full_text)
+        m = re.search(r"([A-Z][a-z]+ (?:[A-Z][a-z]+ )?[A-Z][a-z]+)", header_text)
         if m and m.group(1).lower() not in SECTION_NAMES:
             name = m.group(1).strip()
 
-    email_m   = re.search(r"[\w.+-]+@[\w.-]+\.\w{2,}", full_text)
-    phone_m   = re.search(r"[\+\d][\d\s\-\(\)\.]{7,15}\d", full_text)
-    linkedin  = re.search(r"linkedin\.com/in/[\w\-]+", full_text, re.I)
-    github    = re.search(r"github\.com/[\w\-]+", full_text, re.I)
-    portfolio = re.search(r"https?://[\w\.\-/]+(?:portfolio|personal|me|dev|io)[\w\.\-/]*", full_text, re.I)
+    # 2. Email extraction: check header first, then entire resume
+    email = ""
+    email_pat = r"(?:mailto:)?([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)"
+    email_m = re.search(email_pat, header_text, re.I)
+    if not email_m:
+        email_m = re.search(email_pat, full_text, re.I)
+    if email_m:
+        email = email_m.group(1).strip().rstrip(".,;)>]}'\"")
+
+    # 3. Phone extraction: check header first, then entire resume
+    phone = ""
+    phone_m = re.search(r"[\+\d][\d\s\-\(\)\.]{7,15}\d", header_text)
+    if not phone_m:
+        phone_m = re.search(r"[\+\d][\d\s\-\(\)\.]{7,15}\d", full_text)
+    if phone_m:
+        p_cand = phone_m.group().strip()
+        if not re.match(r"^\d{4}\s*[-–—]\s*\d{4}$", p_cand):
+            phone = p_cand
+
+    # 4. LinkedIn extraction: check header first, then entire resume
+    linkedin_url = ""
+    # Explicit URL: https://linkedin.com/in/... or linkedin.com/in/... or linkedin.com/username
+    li_m = re.search(r"(?:https?://)?(?:www\.)?linkedin\.com/(?:in/)?([a-zA-Z0-9_\-]+)/?", header_text, re.I)
+    if not li_m:
+        li_m = re.search(r"(?:https?://)?(?:www\.)?linkedin\.com/(?:in/)?([a-zA-Z0-9_\-]+)/?", full_text, re.I)
+    # Label followed by username: e.g. "LinkedIn: username" or "LinkedIn | username"
+    if not li_m:
+        li_m = re.search(r"\b(?:linkedin|linked\s*in)[ \t]*[:|/\-–—]+[ \t]*(?:https?://(?:www\.)?linkedin\.com/in/)?([a-zA-Z0-9_\-]+)", header_text, re.I)
+    if li_m:
+        handle = li_m.group(1).strip().rstrip(".,;)>]}'\"")
+        li_skip = {"profile", "in", "pub", "company", "jobs", "about", "me", "summary", "contact", "experience", "education", "skills"}
+        if handle and handle.lower() not in li_skip:
+            linkedin_url = f"https://www.linkedin.com/in/{handle}"
+
+    # 5. GitHub extraction: check header first, then entire resume
+    github_url = ""
+    gh_m = re.search(r"(?:https?://)?(?:www\.)?github\.com/([a-zA-Z0-9_\-]+)/?", header_text, re.I)
+    if not gh_m:
+        gh_m = re.search(r"(?:https?://)?(?:www\.)?github\.com/([a-zA-Z0-9_\-]+)/?", full_text, re.I)
+    if not gh_m:
+        gh_m = re.search(r"\b(?:github|git\s*hub)[ \t]*[:|/\-–—]+[ \t]*(?:https?://(?:www\.)?github\.com/)?([a-zA-Z0-9_\-]+)", header_text, re.I)
+    if gh_m:
+        handle = gh_m.group(1).strip().rstrip(".,;)>]}'\"")
+        gh_skip = {"actions", "workflows", "packages", "topics", "features", "blob", "tree", "pull", "issues", "repositories", "repo", "projects", "project", "experience", "education", "skills", "about", "me", "summary", "contact", "profile"}
+        if handle and handle.lower() not in gh_skip:
+            github_url = f"https://github.com/{handle}"
+
+    # 6. Portfolio / Personal website / other URLs
+    portfolio_url = ""
+    port_m = re.search(r"https?://[a-zA-Z0-9_\-\.]+(?:portfolio|personal|me|dev|io|vercel\.app|netlify\.app|xyz)[a-zA-Z0-9_\-\./]*", header_text, re.I)
+    if not port_m:
+        port_m = re.search(r"https?://[a-zA-Z0-9_\-\.]+(?:portfolio|personal|me|dev|io|vercel\.app|netlify\.app|xyz)[a-zA-Z0-9_\-\./]*", full_text, re.I)
+    if not port_m:
+        port_lbl_m = re.search(r"(?:portfolio|website|site|web)[\s:|/\-–—]+(https?://\S+|[a-zA-Z0-9_\-]+\.(?:vercel\.app|netlify\.app|xyz|dev|me|io|com))", header_text, re.I)
+        if port_lbl_m:
+            raw_p = port_lbl_m.group(1).strip().rstrip(".,;)>]}'\"")
+            portfolio_url = _normalize_web_url(raw_p)
+    else:
+        portfolio_url = _normalize_web_url(port_m.group())
 
     links: list[str] = []
-    if linkedin:  links.append(linkedin.group())
-    if github:    links.append(github.group())
-    if portfolio and portfolio.group() not in " ".join(links):
-        links.append(portfolio.group())
+    seen: set[str] = set()
+
+    def add_link(link: str):
+        if not link:
+            return
+        norm_l = re.sub(r"^https?://(?:www\.)?", "", link).rstrip("/").lower()
+        if norm_l and norm_l not in seen:
+            seen.add(norm_l)
+            links.append(_normalize_web_url(link))
+
+    if linkedin_url:
+        add_link(linkedin_url)
+    if github_url:
+        add_link(github_url)
+    if portfolio_url:
+        add_link(portfolio_url)
+
+    # Detect other clean URLs in header lines
+    for line in lines[:15]:
+        for url_m in re.finditer(r"https?://[^\s,;()<>]+|(?:www\.)[^\s,;()<>]+", line):
+            u = url_m.group().rstrip(".,;)>]}'\"")
+            if "@" in u or "github.com" in u.lower() or "linkedin.com" in u.lower():
+                continue
+            add_link(u)
 
     return ContactInfo(
         name=name,
-        email=email_m.group().strip() if email_m else "",
-        phone=phone_m.group().strip() if phone_m else "",
+        email=email,
+        phone=phone,
         links=links,
     )
 
